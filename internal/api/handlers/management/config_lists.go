@@ -148,6 +148,7 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	type geminiKeyPatch struct {
 		APIKey         *string            `json:"api-key"`
+		Name           *string            `json:"name"`
 		Prefix         *string            `json:"prefix"`
 		BaseURL        *string            `json:"base-url"`
 		ProxyURL       *string            `json:"proxy-url"`
@@ -196,6 +197,9 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 			return
 		}
 		entry.APIKey = trimmed
+	}
+	if body.Value.Name != nil {
+		entry.Name = strings.TrimSpace(*body.Value.Name)
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
@@ -469,6 +473,7 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	type claudeKeyPatch struct {
 		APIKey                  *string               `json:"api-key"`
+		Name                    *string               `json:"name"`
 		Prefix                  *string               `json:"prefix"`
 		BaseURL                 *string               `json:"base-url"`
 		ProxyURL                *string               `json:"proxy-url"`
@@ -510,6 +515,9 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	entry := h.cfg.ClaudeKey[targetIndex]
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if body.Value.Name != nil {
+		entry.Name = strings.TrimSpace(*body.Value.Name)
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
@@ -769,6 +777,7 @@ func (h *Handler) PutVertexCompatKeys(c *gin.Context) {
 func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 	type vertexCompatPatch struct {
 		APIKey         *string                     `json:"api-key"`
+		Name           *string                     `json:"name"`
 		Prefix         *string                     `json:"prefix"`
 		BaseURL        *string                     `json:"base-url"`
 		ProxyURL       *string                     `json:"proxy-url"`
@@ -818,6 +827,9 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 			return
 		}
 		entry.APIKey = trimmed
+	}
+	if body.Value.Name != nil {
+		entry.Name = strings.TrimSpace(*body.Value.Name)
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
@@ -1125,6 +1137,7 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 func (h *Handler) PatchCodexKey(c *gin.Context) {
 	type codexKeyPatch struct {
 		APIKey         *string              `json:"api-key"`
+		Name           *string              `json:"name"`
 		Prefix         *string              `json:"prefix"`
 		BaseURL        *string              `json:"base-url"`
 		ProxyURL       *string              `json:"proxy-url"`
@@ -1165,6 +1178,9 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	entry := h.cfg.CodexKey[targetIndex]
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if body.Value.Name != nil {
+		entry.Name = strings.TrimSpace(*body.Value.Name)
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)

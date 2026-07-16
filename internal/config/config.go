@@ -444,6 +444,9 @@ type ClaudeKey struct {
 	// APIKey is the authentication key for accessing Claude API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// Name is an optional human-readable label for this credential shown in the management panel.
+	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
@@ -511,6 +514,9 @@ type CodexKey struct {
 	// APIKey is the authentication key for accessing Codex API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// Name is an optional human-readable label for this credential shown in the management panel.
+	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
@@ -575,6 +581,9 @@ type XAIModel = CodexModel
 type GeminiKey struct {
 	// APIKey is the authentication key for accessing Gemini API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Name is an optional human-readable label for this credential shown in the management panel.
+	Name string `yaml:"name,omitempty" json:"name,omitempty"`
 
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
@@ -1046,6 +1055,7 @@ func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
 	out := make([]CodexKey, 0, len(entries))
 	for i := range entries {
 		e := entries[i]
+		e.Name = strings.TrimSpace(e.Name)
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
@@ -1065,6 +1075,7 @@ func (cfg *Config) SanitizeClaudeKeys() {
 	}
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
+		entry.Name = strings.TrimSpace(entry.Name)
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
@@ -1080,6 +1091,7 @@ func sanitizeGeminiKeyEntries(entries []GeminiKey) []GeminiKey {
 		if entry.APIKey == "" {
 			continue
 		}
+		entry.Name = strings.TrimSpace(entry.Name)
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
 		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)

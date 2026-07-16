@@ -347,3 +347,86 @@ remote-management:
 
 > 面板缓存路径由 `internal/managementasset/updater.go` 的 `StaticDir()` 决定（默认
 > `~/.cli-proxy-api/`）。重建面板后按方式 B 重新覆盖一次即可。
+
+---
+
+# 改动主题二：为 Gemini / Codex / Claude / Vertex 供应商增加“名称”字段
+
+> 与上面的“伪装 UA”主题完全独立，可单独套用。
+
+**背景**：管理面板里只有 “OpenAI 兼容” 供应商能设置“名称”（config 里的 `name` 字段，既作唯一标识又作显示名）。
+Gemini / Codex / Claude / Vertex 这四类供应商没有 `name` 字段，识别靠 “api-key + base-url”，
+列表里只能显示打码后的 API 密钥，多条同类凭据难以区分。
+
+**本次改动**：给这四类供应商也加上可选的“名称”字段（纯显示标签，**不**参与识别，识别仍用
+api-key + base-url，因此不影响任何既有匹配/去重/删除逻辑）。参考 OpenAI 兼容供应商的做法与外观保持一致。
+xAI 因为 `XAIKey = CodexKey` 是类型别名，自动跟随支持。
+
+**范围说明**：`claudeApi`（Claude 官方 API 专用枠，前端用固定显示名）**不在**本次范围内，保持原样。
+
+---
+
+## 一、结构体新增 `Name` 字段（`internal/config/`）
+
+`Name` 字段统一用 `yaml:"name,omitempty" json:"name,omitempty"`，放在 `APIKey` 之后。
+
+### 1. `internal/config/config.go`
+- `GeminiKey`、`CodexKey`、`ClaudeKey` 三个结构体各加：
+  ```go
+  // Name is an optional human-readable label for this credential shown in the management panel.
+  Name string `yaml:"name,omitempty" json:"name,omitempty"`
+  ```
+  > `XAIKey = CodexKey` 是别名，无需单独改动，xAI 自动获得 `Name`。
+- 各 sanitize 函数里对 `Name` 做 `strings.TrimSpace`：
+  - `sanitizeGeminiKeyEntries`（服务 Gemini 与 Interactions）：`entry.Name = strings.TrimSpace(entry.Name)`
+  - `sanitizeCodexKeyEntries`（服务 Codex 与 xAI）：`e.Name = strings.TrimSpace(e.Name)`
+  - `SanitizeClaudeKeys`：`entry.Name = strings.TrimSpace(entry.Name)`
+
+### 2. `internal/config/vertex_compat.go`
+- `VertexCompatKey` 加同样的 `Name` 字段。
+- `SanitizeVertexCompatKeys` 循环里加 `entry.Name = strings.TrimSpace(entry.Name)`。
+
+---
+
+## 二、管理端 PATCH 接口透传 `Name`（`internal/api/handlers/management/config_lists.go`）
+
+前端保存供应商是「整段数组 PUT」，仅靠结构体加字段即可持久化；但为了让**逐条 PATCH** 接口也一致，
+给以下四个 handler 的内部 patch 结构体加 `Name *string \`json:"name"\``，并在应用字段处加：
+```go
+if body.Value.Name != nil {
+    entry.Name = strings.TrimSpace(*body.Value.Name)
+}
+```
+涉及 handler：
+- `PatchGeminiKey`（内部 `geminiKeyPatch`）
+- `PatchClaudeKey`（内部 `claudeKeyPatch`）
+- `PatchCodexKey`（内部 `codexKeyPatch`）
+- `PatchVertexCompatKey`（内部 `vertexCompatPatch`）
+
+> `PatchInteractionsKey` 里也有一个同名 `geminiKeyPatch` 结构体，本次未加（Interactions 面板不暴露名称）；
+> 如需要可照抄。
+
+---
+
+## 三、涉及文件清单（后端）
+
+修改：
+- `internal/config/config.go`（3 个结构体 + 3 处 sanitize）
+- `internal/config/vertex_compat.go`（1 个结构体 + 1 处 sanitize）
+- `internal/api/handlers/management/config_lists.go`（4 个 PATCH handler）
+
+无需改动 `go.mod` / `go.sum`。
+
+> 前端对应改动见面板仓库 `Cli-Proxy-API-Management-Center` 根目录的 `CHANGES_CUSTOM.md`
+> “供应商名称” 章节。
+
+---
+
+## 四、验证
+
+```bash
+cd /d/AIProject/CLIProxyAPI
+go build ./...
+go test ./internal/config/... ./internal/api/handlers/management/...
+```
+两个包测试均通过。
