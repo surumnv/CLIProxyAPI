@@ -1745,6 +1745,11 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 			}
 		}
 	}
+	// Preserve every remaining inbound Codex header verbatim (e.g. Session-Id,
+	// Thread-Id, X-Codex-Window-Id, X-Codex-Turn-Metadata). Authoritative headers
+	// set above are already present and will not be overwritten; hop-by-hop and
+	// length/host headers are dropped by CopyInboundHeaders itself.
+	util.CopyInboundHeaders(r, ginHeaders)
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes

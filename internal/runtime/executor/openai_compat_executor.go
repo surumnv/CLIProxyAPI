@@ -139,7 +139,15 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	// Preserve inbound client headers (User-Agent, X-Codex-*, Session-Id, ...)
+	// so the upstream sees a request that looks like the original client. The
+	// authoritative Content-Type/Authorization set above are kept as-is;
+	// Authorization intentionally carries the compat provider key rather than the
+	// inbound token, and hop-by-hop/length headers are dropped by the copier.
+	util.CopyInboundHeaders(httpReq, opts.Headers)
+	if strings.TrimSpace(httpReq.Header.Get("User-Agent")) == "" {
+		httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -230,7 +238,15 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 	if apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	// Preserve inbound client headers (User-Agent, X-Codex-*, Session-Id, ...)
+	// so the upstream sees a request that looks like the original client. The
+	// authoritative Content-Type/Authorization set above are kept as-is;
+	// Authorization intentionally carries the compat provider key rather than the
+	// inbound token, and hop-by-hop/length headers are dropped by the copier.
+	util.CopyInboundHeaders(httpReq, opts.Headers)
+	if strings.TrimSpace(httpReq.Header.Get("User-Agent")) == "" {
+		httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -338,7 +354,15 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	// Preserve inbound client headers (User-Agent, X-Codex-*, Session-Id, ...)
+	// so the upstream sees a request that looks like the original client. The
+	// authoritative Content-Type/Authorization set above are kept as-is;
+	// Authorization intentionally carries the compat provider key rather than the
+	// inbound token, and hop-by-hop/length headers are dropped by the copier.
+	util.CopyInboundHeaders(httpReq, opts.Headers)
+	if strings.TrimSpace(httpReq.Header.Get("User-Agent")) == "" {
+		httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -492,7 +516,15 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 	if apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	// Preserve inbound client headers (User-Agent, X-Codex-*, Session-Id, ...)
+	// so the upstream sees a request that looks like the original client. The
+	// authoritative Content-Type/Authorization set above are kept as-is;
+	// Authorization intentionally carries the compat provider key rather than the
+	// inbound token, and hop-by-hop/length headers are dropped by the copier.
+	util.CopyInboundHeaders(httpReq, opts.Headers)
+	if strings.TrimSpace(httpReq.Header.Get("User-Agent")) == "" {
+		httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes

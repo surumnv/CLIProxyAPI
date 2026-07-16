@@ -12,12 +12,35 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
 const defaultAPICallTimeout = 60 * time.Second
+
+// defaultAPICallUserAgent returns the User-Agent used when the management caller
+// does not provide one. It mimics a real local Codex (ChatGPT) client so that
+// upstream relays/WAFs that reject the default "Go-http-client/1.1" signature —
+// or any obviously non-client value — still accept the request. Callers that
+// supply their own User-Agent always take precedence.
+//
+// Two real Codex clients exist and the right one depends on the request:
+//   - Codex Desktop (the ChatGPT desktop app) makes quota / rate-limit lookups.
+//     The management frontend tags those with Originator "Codex Desktop".
+//   - Codex CLI (codex_cli_rs) makes provider /v1/models reachability probes,
+//     which is what the model-list fetch triggers. Those carry no Desktop
+//     Originator.
+//
+// So we pick the UA by the outbound Originator header: a Desktop originator gets
+// the Desktop UA; everything else gets the CLI UA.
+func defaultAPICallUserAgent(originator string) string {
+	if strings.Contains(strings.ToLower(originator), "desktop") {
+		return misc.LocalCodexUserAgent()
+	}
+	return misc.LocalCodexCLIUserAgent()
+}
 
 const (
 	antigravityOAuthClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
@@ -171,6 +194,16 @@ func (h *Handler) APICall(c *gin.Context) {
 	if hostOverride != "" {
 		req.Host = hostOverride
 	}
+	// Provide a real User-Agent when the caller did not supply one. Without this
+	// net/http sends "Go-http-client/1.1", which some relays/WAFs reject when
+	// fetching a provider model list. Which real client we impersonate depends on
+	// the request's Originator: quota/rate-limit lookups are a Codex Desktop
+	// behavior (the frontend tags them Originator "Codex Desktop"), so they get the
+	// Desktop UA; everything else here (notably provider /v1/models reachability
+	// probes) is a Codex CLI behavior, so it gets the codex_cli_rs UA.
+	if strings.TrimSpace(req.Header.Get("User-Agent")) == "" {
+		req.Header.Set("User-Agent", defaultAPICallUserAgent(req.Header.Get("Originator")))
+	}
 
 	httpClient := &http.Client{
 		Timeout: defaultAPICallTimeout,
@@ -199,6 +232,27 @@ func (h *Handler) APICall(c *gin.Context) {
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
 		Body:       string(respBody),
+	})
+}
+
+// RefreshAPICallUserAgent clears the cached local Codex User-Agents and
+// re-detects them, returning the freshly resolved values. Use this after
+// upgrading the local Codex CLI / Desktop app so subsequent api-call requests
+// advertise the new version without restarting the proxy.
+//
+// The response reports both UAs: "desktop" (used for quota/rate-limit lookups)
+// and "cli" (used for provider /v1/models reachability probes). "user_agent" is
+// kept as an alias of the Desktop UA for backward compatibility.
+//
+// Endpoint:
+//
+//	POST /v0/management/api-call/refresh-user-agent
+func (h *Handler) RefreshAPICallUserAgent(c *gin.Context) {
+	desktop, cli := misc.RefreshLocalCodexUserAgents()
+	c.JSON(http.StatusOK, gin.H{
+		"user_agent": desktop,
+		"desktop":    desktop,
+		"cli":        cli,
 	})
 }
 
