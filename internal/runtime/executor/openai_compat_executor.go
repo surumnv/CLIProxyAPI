@@ -144,7 +144,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	// authoritative Content-Type/Authorization set above are kept as-is;
 	// Authorization intentionally carries the compat provider key rather than the
 	// inbound token, and hop-by-hop/length headers are dropped by the copier.
-	util.CopyInboundHeaders(httpReq, opts.Headers)
+	util.CopyInboundHeaders(httpReq, opts.Headers, openAICompatChatHeaderSkips(endpoint)...)
 	if strings.TrimSpace(httpReq.Header.Get("User-Agent")) == "" {
 		httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
 	}
@@ -205,6 +205,20 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, body, &param)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
+}
+
+// openAICompatChatHeaderSkips returns extra inbound headers to withhold when the
+// executor has translated a Responses-protocol payload into a /chat/completions
+// body. The Codex Responses-Lite header announces Responses-Lite semantics
+// (e.g. requiring reasoning.context=all_turns), which only exist on the
+// Responses protocol; forwarding it alongside a Chat body makes upstreams
+// reject the request as protocol-inconsistent. Passthrough Responses endpoints
+// keep the header untouched.
+func openAICompatChatHeaderSkips(endpoint string) []string {
+	if endpoint != "/chat/completions" {
+		return nil
+	}
+	return []string{codexResponsesLiteHeader}
 }
 
 func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (resp cliproxyexecutor.Response, err error) {
@@ -359,7 +373,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	// authoritative Content-Type/Authorization set above are kept as-is;
 	// Authorization intentionally carries the compat provider key rather than the
 	// inbound token, and hop-by-hop/length headers are dropped by the copier.
-	util.CopyInboundHeaders(httpReq, opts.Headers)
+	util.CopyInboundHeaders(httpReq, opts.Headers, openAICompatChatHeaderSkips("/chat/completions")...)
 	if strings.TrimSpace(httpReq.Header.Get("User-Agent")) == "" {
 		httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
 	}

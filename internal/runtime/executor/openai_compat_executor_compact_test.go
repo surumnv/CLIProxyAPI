@@ -106,6 +106,116 @@ func TestOpenAICompatExecutorPayloadOverrideWinsOverThinkingSuffix(t *testing.T)
 	}
 }
 
+func TestOpenAICompatExecutorChatStripsResponsesLiteHeader(t *testing.T) {
+	var gotLiteHeader []string
+	var gotTurnMetadata string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotLiteHeader = r.Header.Values(codexResponsesLiteHeader)
+		gotTurnMetadata = r.Header.Get("X-Codex-Turn-Metadata")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	payload := []byte(`{"model":"gpt-5.6","input":[{"role":"user","content":"hi"}]}`)
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.6",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       false,
+		Headers: http.Header{
+			codexResponsesLiteHeader: []string{"true"},
+			"X-Codex-Turn-Metadata":  []string{"turn-meta"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if len(gotLiteHeader) != 0 {
+		t.Fatalf("responses-lite header forwarded to /chat/completions: %v", gotLiteHeader)
+	}
+	if gotTurnMetadata != "turn-meta" {
+		t.Fatalf("X-Codex-Turn-Metadata = %q, want %q", gotTurnMetadata, "turn-meta")
+	}
+}
+
+func TestOpenAICompatExecutorChatStreamStripsResponsesLiteHeader(t *testing.T) {
+	var gotLiteHeader []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotLiteHeader = r.Header.Values(codexResponsesLiteHeader)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}` + "\n\ndata: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.6",
+		Payload: []byte(`{"model":"gpt-5.6","input":[{"role":"user","content":"hi"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+		Headers: http.Header{
+			codexResponsesLiteHeader: []string{"true"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+	}
+	if len(gotLiteHeader) != 0 {
+		t.Fatalf("responses-lite header forwarded to /chat/completions: %v", gotLiteHeader)
+	}
+}
+
+func TestOpenAICompatExecutorCompactKeepsResponsesLiteHeader(t *testing.T) {
+	var gotLiteHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotLiteHeader = r.Header.Get(codexResponsesLiteHeader)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	payload := []byte(`{"model":"gpt-5.6","input":[{"role":"user","content":"hi"}]}`)
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.6",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Alt:          "responses/compact",
+		Stream:       false,
+		Headers: http.Header{
+			codexResponsesLiteHeader: []string{"true"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if gotLiteHeader != "true" {
+		t.Fatalf("responses-lite header = %q, want %q on responses endpoint", gotLiteHeader, "true")
+	}
+}
+
 func TestOpenAICompatExecutorImagesGenerationsPassthrough(t *testing.T) {
 	var gotPath string
 	var gotBody []byte
