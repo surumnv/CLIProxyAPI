@@ -213,20 +213,34 @@ func TestOrderedH1RoundTripperDropsExpiredIdleConnection(t *testing.T) {
 	}
 }
 
-func TestSharedOrderedH1RoundTripperSeparatesFallbackTransports(t *testing.T) {
+func TestSharedOrderedH1RoundTripperKeyedByProxyURL(t *testing.T) {
 	t.Parallel()
 
+	// The shared transport must be keyed by proxyURL alone, NOT by the fallback
+	// transport instance. In the real call path (NewUtlsHTTPClient) the fallback
+	// is deterministically derived from proxyURL (empty -> http.DefaultTransport;
+	// non-empty -> a freshly built proxy transport), so two fallbacks for the same
+	// proxyURL are behaviorally identical. Keying on the fallback pointer would
+	// mint a brand-new entry (and a fresh, never-reused connection pool) on every
+	// request, leaking sync.Map entries unboundedly and defeating pooling. So:
+	// same proxyURL must return the SAME shared instance regardless of fallback.
 	fallbackA := &http.Transport{}
 	fallbackB := &http.Transport{}
-	rtA1 := sharedOrderedH1RoundTripper("", fallbackA)
-	rtA2 := sharedOrderedH1RoundTripper("", fallbackA)
-	rtB := sharedOrderedH1RoundTripper("", fallbackB)
-
-	if rtA1 != rtA2 {
-		t.Fatal("expected same shared transport for identical proxyURL+fallback")
+	rtDirect1 := sharedOrderedH1RoundTripper("", fallbackA)
+	rtDirect2 := sharedOrderedH1RoundTripper("", fallbackB)
+	if rtDirect1 != rtDirect2 {
+		t.Fatal("expected same shared transport for identical proxyURL regardless of fallback instance")
 	}
-	if rtA1 == rtB {
-		t.Fatal("expected different shared transports for different fallback instances")
+
+	// Distinct proxyURLs must get distinct shared instances (separate pools).
+	proxyURL := "http://127.0.0.1:65535"
+	rtProxy1 := sharedOrderedH1RoundTripper(proxyURL, fallbackA)
+	rtProxy2 := sharedOrderedH1RoundTripper(proxyURL, fallbackB)
+	if rtProxy1 != rtProxy2 {
+		t.Fatal("expected same shared transport for identical proxyURL regardless of fallback instance")
+	}
+	if rtProxy1 == rtDirect1 {
+		t.Fatal("expected different shared transports for different proxyURLs")
 	}
 }
 
@@ -379,5 +393,98 @@ func TestOrderedH1DialRespectsContextCancel(t *testing.T) {
 	}
 	if !strings.Contains(errDial.Error(), "canceled") && ctx.Err() == nil {
 		t.Fatalf("expected context cancellation error, got %v", errDial)
+	}
+}
+
+// TestOpenOrderedH1RequestBodyReplaysOnRetry guards the H1 fix: a retry must not
+// silently send an empty body. The first call to openOrderedH1RequestBody on an
+// unknown-length body (Body != nil, ContentLength == 0) buffers it, replaces
+// req.Body with http.NoBody, and installs GetBody. A second call (the retry) must
+// still yield the full body via that GetBody rather than short-circuiting on the
+// http.NoBody guard.
+func TestOpenOrderedH1RequestBodyReplaysOnRetry(t *testing.T) {
+	t.Parallel()
+
+	payload := "retry-must-replay-this-entire-body"
+	req, err := http.NewRequest(http.MethodPost, "http://example.invalid/", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Body = io.NopCloser(strings.NewReader(payload))
+	req.ContentLength = 0
+
+	readAll := func(body io.ReadCloser, cl int64) string {
+		if body == nil {
+			return ""
+		}
+		data, errRead := io.ReadAll(body)
+		if errRead != nil {
+			t.Fatalf("ReadAll: %v", errRead)
+		}
+		_ = body.Close()
+		if int64(len(data)) != cl {
+			t.Fatalf("content length = %d, want %d", cl, len(data))
+		}
+		return string(data)
+	}
+
+	body1, cl1, _, err1 := openOrderedH1RequestBody(req)
+	if err1 != nil {
+		t.Fatalf("first openOrderedH1RequestBody: %v", err1)
+	}
+	if got := readAll(body1, cl1); got != payload {
+		t.Fatalf("first attempt body = %q, want %q", got, payload)
+	}
+
+	body2, cl2, _, err2 := openOrderedH1RequestBody(req)
+	if err2 != nil {
+		t.Fatalf("retry openOrderedH1RequestBody: %v", err2)
+	}
+	if got := readAll(body2, cl2); got != payload {
+		t.Fatalf("retry body = %q, want %q (retry must replay the full body, not send empty)", got, payload)
+	}
+}
+
+// TestOrderedH1RequestReplayable guards the H6 fix: after the head and full body
+// are written, a read-response failure on a reused connection may only be retried
+// for idempotent requests, or an already-processed non-idempotent request would be
+// duplicated upstream.
+func TestOrderedH1RequestReplayable(t *testing.T) {
+	t.Parallel()
+
+	newReq := func(method string, body io.Reader) *http.Request {
+		r, err := http.NewRequest(method, "http://example.invalid/", body)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		return r
+	}
+
+	if !orderedH1RequestReplayable(newReq(http.MethodGet, nil)) {
+		t.Fatal("GET should be replayable")
+	}
+	if !orderedH1RequestReplayable(newReq(http.MethodHead, nil)) {
+		t.Fatal("HEAD should be replayable")
+	}
+	if !orderedH1RequestReplayable(newReq(http.MethodOptions, nil)) {
+		t.Fatal("OPTIONS should be replayable")
+	}
+	// PUT/DELETE are spec-idempotent but net/http deliberately does NOT auto-replay
+	// them; we mirror that conservative behavior rather than the HTTP spec.
+	if orderedH1RequestReplayable(newReq(http.MethodPut, strings.NewReader("x"))) {
+		t.Fatal("PUT must NOT be replayable (net/http semantics)")
+	}
+	if orderedH1RequestReplayable(newReq(http.MethodDelete, nil)) {
+		t.Fatal("DELETE must NOT be replayable (net/http semantics)")
+	}
+	if orderedH1RequestReplayable(newReq(http.MethodPost, strings.NewReader("x"))) {
+		t.Fatal("POST must NOT be replayable")
+	}
+
+	// An idempotency key makes even a POST replayable, mirroring net/http.
+	postWithKey := newReq(http.MethodPost, strings.NewReader("x"))
+	postWithKey.Header.Set("Idempotency-Key", "abc123")
+	if !orderedH1RequestReplayable(postWithKey) {
+		t.Fatal("POST with Idempotency-Key should be replayable")
 	}
 }

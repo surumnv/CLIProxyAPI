@@ -24,7 +24,6 @@ import (
 const (
 	orderedH1MaxIdlePerKey = 2
 	orderedH1IdleTimeout   = 90 * time.Second
-	orderedH1ProbeTimeout  = 25 * time.Millisecond
 	orderedH1ProbeMinIdle  = 100 * time.Millisecond
 )
 
@@ -65,22 +64,30 @@ func newOrderedH1RoundTripper(proxyURL string, fallback http.RoundTripper) http.
 
 var sharedOrderedH1RoundTrippers sync.Map
 
-func sharedOrderedH1CacheKey(proxyURL string, fallback http.RoundTripper) string {
+// sharedOrderedH1CacheKey keys the shared ordered-h1 transport on the proxy URL
+// alone. In the only production caller (NewUtlsHTTPClient) the fallback transport
+// is fully determined by proxyURL: an empty proxyURL always yields
+// http.DefaultTransport, and a non-empty proxyURL yields a proxy transport built
+// from that same URL. Two fallbacks for the same proxyURL are therefore always
+// behaviorally identical, so folding the fallback identity into the key is
+// unnecessary. Doing so was actively harmful: buildProxyTransport allocates a
+// fresh *http.Transport on every NewUtlsHTTPClient call, so a pointer-based key
+// produced a unique entry per request — an unbounded sync.Map leak and a brand
+// new (empty) idle pool each time, defeating connection reuse whenever a proxy
+// was configured. Keying on proxyURL keeps one stable shared instance per proxy.
+func sharedOrderedH1CacheKey(proxyURL string) string {
 	proxyURL = strings.TrimSpace(proxyURL)
 	if proxyURL == "" {
-		proxyURL = "direct"
+		return "direct"
 	}
-	if fallback == nil || fallback == http.DefaultTransport {
-		return proxyURL + "|default"
-	}
-	return fmt.Sprintf("%s|%T|%p", proxyURL, fallback, fallback)
+	return proxyURL
 }
 
 func sharedOrderedH1RoundTripper(proxyURL string, fallback http.RoundTripper) http.RoundTripper {
 	if fallback == nil {
 		fallback = http.DefaultTransport
 	}
-	key := sharedOrderedH1CacheKey(proxyURL, fallback)
+	key := sharedOrderedH1CacheKey(proxyURL)
 	if cached, ok := sharedOrderedH1RoundTrippers.Load(key); ok {
 		return cached.(http.RoundTripper)
 	}
@@ -171,9 +178,14 @@ func (t *orderedH1RoundTripper) roundTripAttempt(req *http.Request, lines []util
 	resp, errRead := http.ReadResponse(pc.reader, req)
 	if errRead != nil {
 		pc.close()
-		// Request body was fully written; retry only when GetBody can rebuild it
-		// or there was no body.
-		if reused && retryReused && (req.GetBody != nil || contentLength == 0) {
+		// The head and full body were already written, so the upstream may have
+		// received and acted on the request before the connection failed. Retry
+		// ONLY idempotent requests (mirrors net/http Request.isReplayable): a POST
+		// or other non-idempotent method must not be resent here, or a request the
+		// upstream already processed would be duplicated. Non-idempotent requests
+		// surface the error to the caller instead. Stale-connection failures for
+		// idempotent requests are still hidden by the single reuse retry.
+		if reused && retryReused && orderedH1RequestReplayable(req) {
 			return t.roundTripAttempt(req, lines, false)
 		}
 		if errClose := pc.closeErr(); errClose != nil {
@@ -198,23 +210,36 @@ func (t *orderedH1RoundTripper) roundTripAttempt(req *http.Request, lines []util
 // that should be advertised. Known-length bodies are streamed; only unknown-length
 // bodies are buffered so the request can still carry a Content-Length.
 // ownsBody is true when the caller must Close the returned reader.
+//
+// This function is called once per attempt, including retries. GetBody is
+// consulted FIRST because it yields a fresh reader on every call, which is
+// exactly what a retry needs: a prior attempt on an unknown-length body buffers
+// it, replaces req.Body with http.NoBody, and installs a GetBody that replays
+// the buffered bytes. Checking GetBody before the http.NoBody short-circuit is
+// what stops a retry from silently resending an empty body.
 func openOrderedH1RequestBody(req *http.Request) (body io.ReadCloser, contentLength int64, ownsBody bool, err error) {
-	if req == nil || req.Body == nil || req.Body == http.NoBody {
+	if req == nil {
+		return nil, 0, false, nil
+	}
+	if req.ContentLength > 0 && req.GetBody != nil {
+		opened, errBody := req.GetBody()
+		if errBody != nil {
+			return nil, 0, false, errBody
+		}
+		return opened, req.ContentLength, true, nil
+	}
+	if req.Body == nil || req.Body == http.NoBody {
 		return nil, 0, false, nil
 	}
 	if req.ContentLength > 0 {
-		if req.GetBody != nil {
-			opened, errBody := req.GetBody()
-			if errBody != nil {
-				return nil, 0, false, errBody
-			}
-			return opened, req.ContentLength, true, nil
-		}
-		// Stream the original body once. Retries after body writes require GetBody.
+		// Known length, no GetBody: stream the original body once. Retries after
+		// any body bytes have been written are refused (see roundTripAttempt),
+		// because the single reader cannot be rewound.
 		return req.Body, req.ContentLength, false, nil
 	}
 
-	// Unknown length: buffer once so we can emit Content-Length and optionally retry.
+	// Unknown length: buffer once so we can emit Content-Length and, via the
+	// GetBody installed below, replay the body on a retry.
 	defer func() {
 		if errClose := req.Body.Close(); errClose != nil {
 			log.Errorf("ordered h1: request body close error: %v", errClose)
@@ -230,6 +255,35 @@ func openOrderedH1RequestBody(req *http.Request) (body io.ReadCloser, contentLen
 		return io.NopCloser(bytes.NewReader(data)), nil
 	}
 	return io.NopCloser(bytes.NewReader(data)), int64(len(data)), true, nil
+}
+
+// orderedH1RequestReplayable reports whether a request whose head+body were
+// already fully written may be safely re-sent on a fresh connection after a
+// response-read failure. It mirrors net/http's (*Request).isReplayable: the body
+// must be rebuildable (nil/NoBody/GetBody), and the method must be idempotent, or
+// the request must carry an explicit idempotency key. This prevents duplicating a
+// side effect when the upstream already processed the request.
+func orderedH1RequestReplayable(req *http.Request) bool {
+	if req == nil {
+		return false
+	}
+	if !(req.Body == nil || req.Body == http.NoBody || req.GetBody != nil) {
+		return false
+	}
+	method := req.Method
+	if method == "" {
+		method = http.MethodGet
+	}
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		return true
+	}
+	// Idempotency-Key / X-Idempotency-Key signal that a POST (or other method) is
+	// safe to retry; widely used convention (see golang.org/issue/19943).
+	if req.Header.Get("Idempotency-Key") != "" || req.Header.Get("X-Idempotency-Key") != "" {
+		return true
+	}
+	return false
 }
 
 func copyOrderedH1RequestBody(conn net.Conn, body io.Reader, contentLength int64) error {
@@ -634,7 +688,15 @@ func (c *orderedH1PersistConn) alive() bool {
 	if !c.idleAt.IsZero() && time.Since(c.idleAt) < orderedH1ProbeMinIdle {
 		return true
 	}
-	if errDeadline := c.conn.SetReadDeadline(time.Now().Add(orderedH1ProbeTimeout)); errDeadline != nil {
+	// Non-blocking liveness probe: a past read deadline makes Peek return at once
+	// rather than blocking for a timeout window. A healthy idle connection has no
+	// pending bytes, so Peek returns a deadline-exceeded (timeout) error
+	// immediately -> alive. A closed or half-open connection returns EOF/RST
+	// immediately -> dead. This avoids adding probe latency to every reused
+	// connection (a fixed positive timeout would block the full window on healthy
+	// connections, since there is nothing to read). A connection that slips
+	// through as half-open is still recovered by the reused-connection retry path.
+	if errDeadline := c.conn.SetReadDeadline(time.Now().Add(-time.Second)); errDeadline != nil {
 		return false
 	}
 	defer func() {

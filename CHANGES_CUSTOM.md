@@ -811,3 +811,131 @@ go test ./internal/misc/... ./internal/api/handlers/management/...
 > **升级套用提醒**：Desktop 升级后内嵌 claude-code 版本会变，`detectClaudeDesktopEmbeddedVersion` 会
 > 自动跟随（取 `Claude-3p\claude-code\` 下最高的已验证版本）；只有探测彻底失败才回落到写死的
 > `LocalClaudeCodeUAFallback`，届时该常量的版本需手动跟一下。
+
+---
+
+# 改动主题六：审查修复（透传安全 + ordered H1 稳定性/性能 + Claude beta 修正）
+
+> 本主题是对前述主题一~五的一轮代码审查后的修复集合。**核心原则不变**：尽量如实透传真实
+> Codex / Claude Desktop 的入站请求头、保留其顺序、不捏造字段；这里只是堵住"会误伤真实请求"或
+> "会泄漏/损坏/泄漏内存"的漏洞，并在不改变既定透传行为的前提下降低延迟。
+
+## 1. `CopyInboundHeaders` 透传黑名单补充（`internal/util/header_helpers.go`）
+
+`passthroughHeaderDenylist` 新增四个头，全部是"不该原样转发给上游"的：
+
+- `Content-Encoding`：描述**入站** body 的编码。所有 executor 都会把请求体重新序列化成明文 JSON
+  （或重建 multipart），若把入站的 `Content-Encoding: gzip` 转发出去，会让上游以为 body 是 gzip 而
+  实际是明文，直接损坏请求。
+- `Expect`（如 `100-continue`）：对我们已知长度、直接写出的 body 没有意义，可能拖慢或困惑上游。
+- `Cookie` / `Proxy-Authorization`：入站 hop 的会话/凭据材料，转发给第三方上游既泄漏会话又是指纹异常
+  （真实 Codex/Claude 客户端不会往上游发这两个）。
+
+> **说明**：这四个头在实测抓到的真实 Claude Desktop / Codex 请求里**都没有出现**（Claude Desktop
+> 抓包只有 `X-Stainless-*`、`Anthropic-*`、`X-App`、`X-Claude-Code-Session-Id`、`User-Agent`、
+> `Accept`、`Accept-Encoding`、`Authorization`、`Connection`、`Content-Type`、`Content-Length`），
+> 因此加入黑名单**不会误伤**当前真实请求；这是预防性加固，防止将来客户端偶发带上这些头时被原样透传
+> 造成损坏/泄漏。已在代码注释中标注"目前真实请求未遇到"。
+
+## 2. openai-compat 无 api-key 时会泄漏入站 Authorization（`internal/runtime/executor/openai_compat_executor.go`）
+
+**问题**：compat executor 四处出站都只在 `apiKey != ""` 时才 `Set("Authorization", "Bearer "+key)`。
+而 `opts.Headers` 是入站客户端请求的完整克隆（含客户端**向 CPA 鉴权用的 token**）。当某个 compat
+provider **没配 api-key**（本地 Ollama/LM Studio、无鉴权中转常见）时，`CopyInboundHeaders` 会把入站
+`Authorization` 原样拷给第三方上游——泄漏代理凭据。Codex 主路径不受影响（它总会 `Set` Authorization，
+即使空 token 也是非空的 `"Bearer "`，挡住拷贝）。
+
+**修改**：把原 `openAICompatChatHeaderSkips` 改名为 `openAICompatHeaderSkips`，**无条件**把
+`Authorization`、`X-Api-Key` 放进 skip 列表（`/chat/completions` 额外再 skip Codex Responses-Lite 头，
+逻辑不变），并把全部 4 处调用点（含两个 images 站点，原先**完全没传 skip**）都换成它。这样无论是否配
+provider key，入站凭据都不会被透传。
+
+## 3. ordered H1：重试时静默丢弃请求体（`ordered_h1_round_tripper.go`，最严重）
+
+**问题**：对 `Body != nil && ContentLength == 0`（流式/未知长度）请求，`openOrderedH1RequestBody`
+首次会缓冲 body、把 `req.Body` 换成 `http.NoBody` 并装好 `GetBody`。但任何一次重试重新进入该函数时，
+第一行 `req.Body == http.NoBody` 卫语句直接命中返回空 body——**不看刚装好的 `GetBody`**，于是重试用
+空 body 重发上游（例如变成没有 messages 的请求），且不报错。恰好击穿了当初 commit 9c801050 想修的场景。
+
+**修改**：调整 `openOrderedH1RequestBody` 的判断顺序——**先查 `GetBody`**（它每次返回全新 reader，正是
+重试所需），再走 `http.NoBody` 短路。这样首发和重试都能拿到完整 body。已知长度且无 GetBody 的流式路径
+行为不变（写出 body 后仍拒绝重试，因为单次 reader 无法回绕）。
+
+新增测试 `TestOpenOrderedH1RequestBodyReplaysOnRetry`：对同一请求连续调用两次（首发+重试），断言第二次
+仍产出完整 body。
+
+## 4. ordered H1：配代理时连接池失效 + `sync.Map` 无界增长（内存泄漏）
+
+**问题**：`sharedOrderedH1CacheKey` 把 fallback transport 指针 `%p` 编进缓存 key。而 `NewUtlsHTTPClient`
+是**每请求调用一次**，配代理时 `buildProxyTransport` 每次都 `new` 一个新的 `*http.Transport`。于是每个
+请求产生唯一 key → `LoadOrStore` 插入一条**永不删除**的条目（进程级内存泄漏），且每请求都是全新空闲池
+→ 连接复用从未发生，抵消 c89ca2b8 的性能目标。
+
+**修改**：ordered transport 的缓存键**只用 `proxyURL`**（`sharedOrderedH1CacheKey(proxyURL string)`）。
+理由：在真实调用路径里 fallback 完全由 proxyURL 决定——空 proxyURL 恒为 `http.DefaultTransport`，非空
+则是由**同一** proxyURL 构建的代理 transport，行为一致；原来掺 `%p` 是过度修正，正是泄漏根因。
+同 proxyURL 现在稳定复用同一个 ordered transport（含其空闲池）。
+
+原测试 `TestSharedOrderedH1RoundTripperSeparatesFallbackTransports`（断言不同 fallback 实例分开）编码的
+是错误意图，改写为 `TestSharedOrderedH1RoundTripperKeyedByProxyURL`：同 proxyURL 复用同一实例、不同
+proxyURL 得不同实例。
+
+## 5. ordered H1：ReadResponse 失败重试增加幂等判断
+
+**问题**：head+body 已完整写出后若 `ReadResponse` 失败，原代码对任何可重建 body 的请求都重试，不看
+method。若上游其实已收到并处理了这个 POST，只是响应没读到，重试会**重复副作用**。
+
+**修改**：新增 `orderedH1RequestReplayable`，**对齐 net/http 的 `(*Request).isReplayable`**：body 必须
+可重建（nil/NoBody/GetBody），且 method 为 GET/HEAD/OPTIONS/TRACE，或带 `Idempotency-Key` /
+`X-Idempotency-Key`。仅这类请求才在读响应失败后重试；POST 等非幂等请求直接把错误返回给调用方。
+（head 写失败、body 写失败两处重试保持不变——那是"上游尚未实质收到"的场景，重试任何 method 都安全，
+与 stdlib 一致。）
+
+新增测试 `TestOrderedH1RequestReplayable` 覆盖 GET/HEAD 可重试、POST/PATCH 不可重试、带幂等 key 的 POST
+可重试。
+
+## 6. ordered H1：非阻塞探活，去掉每次复用的固定延迟
+
+**问题**：复用空闲连接前用 `Peek(1)` + 25ms 读超时探活。健康连接因无待读数据会**阻塞满 25ms** 才返回
+（探活只在有数据/EOF 时提前返回），于是每次复用 >100ms 的连接都多付最多 25ms 延迟。
+
+**修改**：把读探活的 deadline 设成**过去时刻**（`time.Now().Add(-time.Second)`），使 `Peek` 立即返回：
+健康连接立刻拿到 deadline-exceeded（判活），已关闭/半开连接立刻拿到 EOF/RST（判死），**不再阻塞**。
+删除不再使用的 `orderedH1ProbeTimeout` 常量。`<100ms` 的热路径直接复用捷径保留；万一半开连接漏网，
+现在有第 5 条收紧后的安全重试兜底。
+
+## 7. Claude `Anthropic-Beta`：body 里的 oauth beta 不再被误剥（`claude_executor.go`）
+
+**问题**（对主题四第 3 条的补全）：`clientSuppliedOAuth` 原来只看入站 `Anthropic-Beta` **请求头**。但
+客户端也能通过请求体 `betas` 数组带 oauth beta（经 `extractAndRemoveBetas` 变成 `extraBetas`）。若客户端
+用 body 带 oauth beta 发往第三方 base，`clientSuppliedOAuth` 仍为 false → `stripInjectedOAuthBetas` 会
+把客户端**自己真实带的** oauth beta 也剥掉，违背"客户端自带的照常透传"。
+
+**修改**：`clientSuppliedOAuth` 的判定同时检查请求头**和** `extraBetas`——任一含 oauth 即视为客户端自带，
+不再剥离。CPA 自己注入的 `oauth-2025-04-20`（第三方 base 且客户端未自带 oauth 时）仍按原逻辑剥离。
+
+## 涉及文件清单（本主题）
+
+修改：
+- `internal/util/header_helpers.go`（denylist 加 4 个头 + 注释标注"真实请求未遇到"）
+- `internal/runtime/executor/openai_compat_executor.go`（`openAICompatHeaderSkips` 无条件 skip 凭据头，4 处调用点）
+- `internal/runtime/executor/helps/ordered_h1_round_tripper.go`（body 重放、缓存键、幂等重试、非阻塞探活）
+- `internal/runtime/executor/helps/ordered_h1_round_tripper_test.go`（重写 1 个测试 + 新增 3 个测试）
+- `internal/runtime/executor/claude_executor.go`（`clientSuppliedOAuth` 兼顾 body betas）
+
+无需改动 `go.mod` / `go.sum`。前端仓库无需改动。
+
+## 验证
+
+```bash
+cd /d/AIProject/CLIProxyAPI
+go build ./...
+go test ./internal/util/... ./internal/runtime/executor/... ./internal/api/... \
+  ./internal/api/handlers/management/... ./internal/config/... ./internal/misc/... \
+  ./sdk/api/handlers/...
+```
+构建通过，相关包测试全绿。（竞态检测器 `-race` 需要 cgo/C 编译器，本机 Windows 环境缺失，未跑；
+ordered H1 并发部分靠人工审查连接池加锁纪律。）
+
+> **升级套用提醒**：本主题全是对既有自定义代码的修补，随对应文件走。第 3、4 条是 ordered H1 的正确性/
+> 内存关键修复，升级后务必确认仍在。

@@ -1104,7 +1104,20 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 
 	clientBeta := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta"))
+	// A client can supply an oauth beta two ways: via the Anthropic-Beta header,
+	// or via the request body "betas" array (surfaced here as extraBetas). Either
+	// counts as client-supplied, so that the third-party strip below leaves a
+	// genuinely client-provided oauth beta untouched instead of removing it. Only
+	// the oauth beta CPA injects on its own should ever be stripped.
 	clientSuppliedOAuth := strings.Contains(strings.ToLower(clientBeta), "oauth")
+	if !clientSuppliedOAuth {
+		for _, beta := range extraBetas {
+			if strings.Contains(strings.ToLower(strings.TrimSpace(beta)), "oauth") {
+				clientSuppliedOAuth = true
+				break
+			}
+		}
+	}
 	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
 	if clientBeta != "" {
 		baseBetas = clientBeta

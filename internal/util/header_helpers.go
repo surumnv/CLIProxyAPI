@@ -19,6 +19,16 @@ func ApplyCustomHeadersFromAttrs(r *http.Request, attrs map[string]string) {
 // the request body and target, and net/http manages these itself; forwarding the
 // inbound values would produce a wrong Content-Length, a wrong Host, break hop-by-hop
 // semantics, or defeat transparent gzip handling.
+//
+// NOTE on the last four entries (Content-Encoding, Expect, Cookie,
+// Proxy-Authorization): none of these appeared in the real captured request
+// headers from Claude Desktop or Codex that this passthrough is built to
+// preserve. They are denylisted defensively — if a future client (or a
+// misbehaving intermediary) ever adds one, forwarding it verbatim onto a
+// re-serialized request would corrupt the body framing (Content-Encoding),
+// stall the exchange (Expect), or leak inbound-hop credentials to a third-party
+// upstream (Cookie / Proxy-Authorization). Denylisting them now costs nothing
+// for the observed clients and closes those holes ahead of time.
 var passthroughHeaderDenylist = map[string]struct{}{
 	"Content-Length":    {},
 	"Host":              {},
@@ -30,6 +40,27 @@ var passthroughHeaderDenylist = map[string]struct{}{
 	"Trailer":           {},
 	"Upgrade":           {},
 	"Accept-Encoding":   {},
+	// Content-Encoding describes the framing of the *inbound* body. Every executor
+	// re-serializes the request body to plain (uncompressed) JSON or rebuilds the
+	// multipart form before sending, so forwarding the inbound encoding would tell
+	// the upstream the body is e.g. gzip when it is not, corrupting the request.
+	// Not present in any observed Claude Desktop / Codex capture; denylisted
+	// defensively.
+	"Content-Encoding": {},
+	// Expect: 100-continue is meaningless for our re-serialized, known-length
+	// bodies (we write the head and body without waiting for a 100 response) and
+	// can stall or confuse upstreams; drop it rather than forward it verbatim.
+	// Not present in any observed Claude Desktop / Codex capture; denylisted
+	// defensively.
+	"Expect": {},
+	// Cookie / Proxy-Authorization are session/credential material scoped to the
+	// inbound hop. Forwarding them to a third-party upstream both leaks the
+	// client's session and is a fingerprint anomaly (real Codex/Claude clients do
+	// not send them upstream). They are never part of the headers we want to
+	// faithfully pass through. Not present in any observed Claude Desktop / Codex
+	// capture; denylisted defensively.
+	"Cookie":              {},
+	"Proxy-Authorization": {},
 }
 
 // CopyInboundHeaders copies headers from the inbound client request (src) onto the
