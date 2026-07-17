@@ -711,3 +711,103 @@ go test ./internal/api/... ./internal/runtime/executor/... ./internal/util/...
 构建通过，相关包测试全绿。
 
 > **升级套用提醒**：第 1 条改的是公共层 `GetContextWithCancel`，与 provider 无关，务必在升级后确认这段顺序传递仍在——否则改动主题三的顺序透传会再次“装好但没通电”。第 2、3 条随 Claude executor 走。
+
+---
+
+# 改动主题五：管理面板拉取 Claude 模型列表的兜底 UA（跟随 Desktop 内嵌 claude-code 版本）
+
+**背景**：管理面板"拉取模型列表"对 Claude provider 走前端 `fetchClaudeModelsViaApiCall`，它只设
+`x-api-key` / `anthropic-version`，**不带 User-Agent**，因此出站 UA 落到后端 `api_tools.go` 的兜底。
+而原兜底 `defaultAPICallUserAgent` 只在两个 **Codex** UA 之间按 `Originator` 分流——于是拉 Claude
+模型时竟然带的是 Codex 的 UA（`codex_cli_rs/...`），对 Claude 上游是个明显不一致的指纹。
+
+**目标**：给 Claude 请求单独兜底一个**真实的 Claude Code CLI UA**，且版本号跟随本机 **Claude Desktop
+内嵌的 claude-code** 版本（方案 B，本地探测）。
+
+**三个版本号的坑（务必分清，别拿错）**：本机同时装了独立 CLI 和 Desktop，存在三个不同版本号——
+- 独立 Claude Code CLI：`claude --version`（PATH）→ 如 `2.1.201`。**不能用这个。**
+- Desktop 的 MS Store 包版本：`Get-AppxPackage Claude` → 如 `1.22209.0.0`。**无关。**
+- **Desktop 内嵌的 claude-code**：`%LOCALAPPDATA%\Claude-3p\claude-code\<版本>\` 目录名 → 如
+  `2.1.209`。**这才是 Desktop UA `claude-cli/2.1.209 (...)` 里的版本，要用的就是它。**
+  （`Claude-3p` 的 `3p` 对应 Desktop UA 里的 `claude-desktop-3p` 入口标记。）
+
+**UA 形态（本次决定：纯 CLI 格式，entrypoint = `cli`）**：
+```
+claude-cli/<Desktop内嵌claude-code版本> (external, cli)
+```
+不用 Desktop 原始的 `(external, claude-desktop-3p, agent-sdk/x.y.z)` 后缀——拉模型本就是 CLI 风格的
+可达性探测，用 `cli` 入口更自洽，也不暴露桌面内嵌标记。Claude Code CLI 的 UA **没有** OS/arch/终端段
+（比 Codex 简单，Codex 那套 `(Windows x.y.z; x86_64) WindowsTerminal` 不适用）。
+
+## 一、新增文件
+
+### `internal/misc/claude_local_ua.go`
+仿 `codex_local_ua.go` 结构，`package misc`。导出：
+- `LocalClaudeCodeUserAgent() string`：进程内缓存 + 加锁；空则用 fallback；永不返回空。
+- `RefreshLocalClaudeCodeUserAgent() string`：清缓存并重探，返回新值。
+- 常量 `LocalClaudeCodeUAFallback = "claude-cli/2.1.209 (external, cli)"`：探测失败时用（本机实测的真实
+  版本；宁可略滞后的真串，也不发合成串）。
+
+内部：
+- `buildLocalClaudeCodeUserAgent()`：探测到版本才拼 `claude-cli/<v> (external, cli)`，否则返回空触发 fallback。
+- `detectClaudeDesktopEmbeddedVersion()`：枚举 `%LOCALAPPDATA%\Claude-3p\claude-code\` 子目录，
+  **只认同时有 `.verified` 标记文件和 `claude.exe` 的目录**，按版本号数值比较取最高，返回目录名当版本号。
+  用目录名而非跑 `claude.exe --version`：目录名即版本号（本机已验证与 `--version` 输出一致），省一次
+  进程调用和超时。非 Windows / Desktop 未装 / 目录不存在 → 返回空 → 走 fallback。
+- `compareClaudeVersions(a, b)`：点分版本逐段数值比较（`2.1.209` > `2.1.60`）。
+
+> 无需 windows/other 拆分文件：探测只读 `LOCALAPPDATA` 目录，非 Windows 上该环境变量为空，自然回落 fallback。
+
+## 二、修改文件
+
+### `internal/api/handlers/management/api_tools.go`
+**(a)** `APICall` 里补 UA 兜底处，改为先判定 Claude 请求：
+```go
+if strings.TrimSpace(req.Header.Get("User-Agent")) == "" {
+    if strings.TrimSpace(req.Header.Get("Anthropic-Version")) != "" {
+        req.Header.Set("User-Agent", misc.LocalClaudeCodeUserAgent())
+    } else {
+        req.Header.Set("User-Agent", defaultAPICallUserAgent(req.Header.Get("Originator")))
+    }
+}
+```
+判定信号用 **`Anthropic-Version` 头是否存在**：前端 `fetchClaudeModelsViaApiCall` 一定设它，Codex 路径
+从不设，比按 URL 匹配可靠（第三方 base 域名各异）。Codex 分支逻辑保持不变。
+
+**(b)** `RefreshAPICallUserAgent` 端点额外清 Claude UA 缓存并在响应里返回（key: `claude`），方便升级
+Desktop 后手动刷新，无需重启代理。
+
+## 三、测试
+
+### `internal/misc/claude_local_ua_test.go`（新增）
+用临时目录模拟 `Claude-3p\claude-code\<版本>\{.verified,claude.exe}` 结构，覆盖：
+- 多版本取最高、缺 `.verified` 或缺 `claude.exe` 的目录被跳过；
+- 版本号数值序（`2.1.209` > `2.1.60`，非字典序）；
+- 根目录不存在 / `LOCALAPPDATA` 为空 → 探测失败；
+- UA 拼装格式；探测失败回落 fallback；`compareClaudeVersions` 各情形。
+
+## 涉及文件清单（本主题）
+
+新增：
+- `internal/misc/claude_local_ua.go`
+- `internal/misc/claude_local_ua_test.go`
+
+修改：
+- `internal/api/handlers/management/api_tools.go`（Claude 请求 UA 分流 + refresh 端点带 Claude UA）
+
+无需改动 `go.mod` / `go.sum`；前端仓库**无需改代码**（前端本就不带 UA，靠本兜底）——但前端与后端之间
+有一条隐含契约：**前端拉 Claude 模型必须带 `Anthropic-Version` 头**，后端据此判定走 Claude UA。前端
+`CHANGES_CUSTOM.md` 已记此契约。
+
+## 验证
+
+```bash
+cd /d/AIProject/CLIProxyAPI
+go build ./...
+go test ./internal/misc/... ./internal/api/handlers/management/...
+```
+构建通过，相关包测试全绿。
+
+> **升级套用提醒**：Desktop 升级后内嵌 claude-code 版本会变，`detectClaudeDesktopEmbeddedVersion` 会
+> 自动跟随（取 `Claude-3p\claude-code\` 下最高的已验证版本）；只有探测彻底失败才回落到写死的
+> `LocalClaudeCodeUAFallback`，届时该常量的版本需手动跟一下。

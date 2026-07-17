@@ -197,12 +197,20 @@ func (h *Handler) APICall(c *gin.Context) {
 	// Provide a real User-Agent when the caller did not supply one. Without this
 	// net/http sends "Go-http-client/1.1", which some relays/WAFs reject when
 	// fetching a provider model list. Which real client we impersonate depends on
-	// the request's Originator: quota/rate-limit lookups are a Codex Desktop
-	// behavior (the frontend tags them Originator "Codex Desktop"), so they get the
-	// Desktop UA; everything else here (notably provider /v1/models reachability
-	// probes) is a Codex CLI behavior, so it gets the codex_cli_rs UA.
+	// the request:
+	//   - Claude requests (the frontend's fetchClaudeModelsViaApiCall always sets
+	//     Anthropic-Version; Codex paths never do) get a Claude Code CLI UA whose
+	//     version tracks the locally installed Claude Desktop's embedded claude-code.
+	//   - Otherwise we keep the Codex split by Originator: quota/rate-limit lookups
+	//     are a Codex Desktop behavior (tagged Originator "Codex Desktop") and get
+	//     the Desktop UA; everything else (notably provider /v1/models reachability
+	//     probes) is a Codex CLI behavior and gets the codex_cli_rs UA.
 	if strings.TrimSpace(req.Header.Get("User-Agent")) == "" {
-		req.Header.Set("User-Agent", defaultAPICallUserAgent(req.Header.Get("Originator")))
+		if strings.TrimSpace(req.Header.Get("Anthropic-Version")) != "" {
+			req.Header.Set("User-Agent", misc.LocalClaudeCodeUserAgent())
+		} else {
+			req.Header.Set("User-Agent", defaultAPICallUserAgent(req.Header.Get("Originator")))
+		}
 	}
 
 	httpClient := &http.Client{
@@ -240,19 +248,22 @@ func (h *Handler) APICall(c *gin.Context) {
 // upgrading the local Codex CLI / Desktop app so subsequent api-call requests
 // advertise the new version without restarting the proxy.
 //
-// The response reports both UAs: "desktop" (used for quota/rate-limit lookups)
-// and "cli" (used for provider /v1/models reachability probes). "user_agent" is
-// kept as an alias of the Desktop UA for backward compatibility.
+// The response reports the Codex UAs "desktop" (quota/rate-limit lookups) and
+// "cli" (provider /v1/models reachability probes), plus "claude" (the Claude Code
+// CLI UA used for Claude model-list fetches). "user_agent" is kept as an alias of
+// the Desktop UA for backward compatibility.
 //
 // Endpoint:
 //
 //	POST /v0/management/api-call/refresh-user-agent
 func (h *Handler) RefreshAPICallUserAgent(c *gin.Context) {
 	desktop, cli := misc.RefreshLocalCodexUserAgents()
+	claude := misc.RefreshLocalClaudeCodeUserAgent()
 	c.JSON(http.StatusOK, gin.H{
 		"user_agent": desktop,
 		"desktop":    desktop,
 		"cli":        cli,
+		"claude":     claude,
 	})
 }
 
