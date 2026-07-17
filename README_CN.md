@@ -124,6 +124,18 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 - 通过配置接入上游 OpenAI 兼容提供商（例如 OpenRouter）
 - 可复用的 Go SDK（见 `docs/sdk-usage_CN.md`）
 
+## Fork 定制增强
+
+本 fork 在官方版本之上做了以下改动，核心目标是让**来自真实 Codex / Claude Desktop 客户端**、经本代理转发到上游的请求尽量保持客户端原样（而不是被代理改写或丢弃字段），另有若干出站传输与管理面板改进。按功能归类：
+
+- **入站请求头如实透传。** 真实 Codex / Claude Desktop 客户端发出的请求头会被保留并原样转发给上游，而不是被严格白名单丢弃。代理仍对必须由自己掌控的头保持权威（`Authorization` / `X-Api-Key` 携带 provider 凭据、绝不泄漏给上游；`Anthropic-Beta`、`Accept`、连接/长度/编码类头由代理管理）；凭据与会话类头（`Cookie`、`Proxy-Authorization`、`Expect`、`Content-Encoding`）绝不转发。
+- **保留原始 HTTP/1.1 请求头顺序。** 出站 HTTP/1.1 请求按入站客户端观察到的请求头名顺序与大小写写出，而非 Go 默认的字母序，使上游看到与真实客户端一致的头顺序。底层是一个手写 HTTP/1.1 传输 + keep-alive 连接池（空闲超时 + 非阻塞探活、跨请求连接复用、幂等安全的单次重试）。
+- **管理请求的本地 User-Agent 兜底。** 当管理面板 / 后端拉取模型列表、额度、额度重置时间等请求未自带 User-Agent 时，代理会补一个真实的本地客户端 UA：Claude 请求补 Claude Code CLI UA，版本跟随本机安装的 Claude Desktop 内嵌 claude-code 版本；Codex 请求对桌面风格调用（额度）补 Codex Desktop UA，对 CLI 风格调用（拉模型探测）补 Codex CLI UA。另提供一个管理端点用于刷新缓存的 UA，无需重启。
+- **Claude Desktop 启动探测本地短路。** Claude Desktop 启动时发出的极小可用性探测请求（及其 `HEAD /` 可达性检查）会被代理识别并本地直接返回，不再转发上游、也不会被中转站拒绝。识别条件很窄且在鉴权之后执行，真实对话请求不会命中。
+- **更多供应商类型支持可选名称。** Gemini / Codex / Claude / Vertex 凭据可在管理面板设置可选的显示名称（原先仅 OpenAI 兼容供应商可设）。该名称仅作显示标签，绝不参与凭据匹配、去重或删除。
+
+详细说明与升级重套用指引见 `CHANGES_CUSTOM.md`。
+
 ## 新手入门
 
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)

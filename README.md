@@ -124,6 +124,18 @@ PackyCode provides special discounts for our software users: register using <a h
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
 
+## Fork Enhancements
+
+This fork adds the following changes on top of upstream, focused on making requests forwarded from real Codex / Claude Desktop clients look like the genuine client (rather than being altered or stripped by the proxy), plus some transport and management-panel improvements. Grouped by feature:
+
+- **Faithful inbound header passthrough.** Headers sent by the real Codex / Claude Desktop client are preserved and forwarded upstream as-is, instead of being dropped by a strict allowlist. The proxy still keeps authoritative control of the headers it must own (`Authorization` / `X-Api-Key` carry the provider credential and are never leaked upstream; `Anthropic-Beta`, `Accept`, connection/length/encoding headers are managed by the proxy). Credential- and session-scoped headers (`Cookie`, `Proxy-Authorization`, `Expect`, `Content-Encoding`) are never forwarded.
+- **Original HTTP/1.1 header order preservation.** Outbound HTTP/1.1 requests are written using the header name order and casing observed from the inbound client, instead of Go's default alphabetical ordering, so the upstream sees an ordering consistent with the real client. Backed by a raw HTTP/1.1 transport with a keep-alive connection pool (idle timeout + non-blocking liveness probe, connection reuse across requests, and idempotency-safe single retry).
+- **Local User-Agent fallback for management requests.** When the management panel / backend fetches model lists, quota, or quota-reset times without supplying a User-Agent, the proxy fills in a real local client UA: Claude requests get a Claude Code CLI UA that tracks the locally installed Claude Desktop embedded claude-code version; Codex requests get a Codex Desktop UA for desktop-style calls (quota) and a Codex CLI UA for CLI-style calls (model probing). A management endpoint refreshes the cached UAs without restarting.
+- **Claude Desktop startup-probe short-circuit.** The tiny availability-probe request Claude Desktop sends on startup (and its `HEAD /` reachability check) is recognized and answered locally by the proxy, so it does not get forwarded upstream or rejected by relays. Gating is narrow and runs after authentication; real conversations never match.
+- **Optional display name for more provider types.** Gemini / Codex / Claude / Vertex credentials can be given an optional human-readable name in the management panel (previously only OpenAI-compatible providers could). The name is a display label only and is never used for credential matching, dedup, or deletion.
+
+Details and upgrade-reapply notes are kept in `CHANGES_CUSTOM.md`.
+
 ## Getting Started
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
