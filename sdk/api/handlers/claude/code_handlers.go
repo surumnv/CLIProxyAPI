@@ -83,6 +83,10 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 
 	// Decode claude-fable-5-dd-<reversed> model IDs back to the real model name for routing.
 	rawJSON = rewriteClaudeDDModelInBody(rawJSON)
+	if isClaudeDesktopStartupProbe(c, rawJSON) {
+		writeClaudeDesktopStartupProbeResponse(c, rawJSON)
+		return
+	}
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
@@ -132,6 +136,61 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
+}
+
+func isClaudeDesktopStartupProbe(c *gin.Context, rawJSON []byte) bool {
+	if c == nil || c.Request == nil || c.Request.Method != http.MethodPost || c.Request.URL == nil || c.Request.URL.Path != "/v1/messages" {
+		return false
+	}
+	if c.GetHeader("Anthropic-Version") == "" {
+		return false
+	}
+	ua := c.GetHeader("User-Agent")
+	uaLower := strings.ToLower(ua)
+	if !strings.Contains(ua, "Claude/") || !strings.Contains(ua, "Electron/") || strings.Contains(uaLower, "claude-cli") {
+		return false
+	}
+	model := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+	if !strings.HasPrefix(model, "claude-") {
+		return false
+	}
+	maxTokens := gjson.GetBytes(rawJSON, "max_tokens")
+	if !maxTokens.Exists() || maxTokens.Int() != 1 {
+		return false
+	}
+	stream := gjson.GetBytes(rawJSON, "stream")
+	if stream.Exists() && stream.Type != gjson.False {
+		return false
+	}
+	if gjson.GetBytes(rawJSON, "tools").Exists() || gjson.GetBytes(rawJSON, "system").Exists() {
+		return false
+	}
+	messages := gjson.GetBytes(rawJSON, "messages")
+	items := messages.Array()
+	if !messages.IsArray() || len(items) != 1 {
+		return false
+	}
+	message := items[0]
+	return message.Get("role").String() == "user" && message.Get("content").String() == "."
+}
+
+func writeClaudeDesktopStartupProbeResponse(c *gin.Context, rawJSON []byte) {
+	model := gjson.GetBytes(rawJSON, "model").String()
+	c.Header("Content-Type", "application/json")
+	c.JSON(http.StatusOK, gin.H{
+		"id":            "msg_01CPAClaudeDesktopProbe",
+		"type":          "message",
+		"role":          "assistant",
+		"model":         model,
+		"content":       []gin.H{{"type": "text", "text": "."}},
+		"stop_reason":   "max_tokens",
+		"stop_sequence": nil,
+		"stop_details":  nil,
+		"usage": gin.H{
+			"input_tokens":  1,
+			"output_tokens": 1,
+		},
+	})
 }
 
 // rewriteClaudeDDModelInBody decodes model IDs of the form claude-fable-5-dd-<reversed>

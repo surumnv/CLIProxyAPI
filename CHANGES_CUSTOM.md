@@ -26,6 +26,67 @@ User-Agent、或缺少客户端头部而拒绝请求。核心手段：
 
 ---
 
+## 追加改动：Claude Desktop 启动探测本地短路
+
+### 修改文件
+
+- `internal/api/server.go`
+- `internal/api/server_test.go`
+- `sdk/api/handlers/claude/code_handlers.go`
+- `sdk/api/handlers/claude/code_handlers_model_test.go`
+
+### 背景
+
+Claude Desktop 启动时会向 `/v1/messages` 发一个极小的可用性探测请求。该请求使用 Electron/浏览器风格
+User-Agent，而不是后续真实调用使用的 `claude-cli` User-Agent。部分上游中转站会把浏览器风格 UA 视为
+非 Claude CLI 客户端请求并拒绝，导致 Claude Desktop 误判供应商不可用。
+
+Claude Desktop 还会向 base URL 发 `HEAD /` 可达性探测，请求头里可能只有 `User-Agent: Bun/...`，没有
+`Anthropic-Version` 或鉴权信息。CPA 原先只注册了 `GET /`，所以 `HEAD /` 会返回 404。该请求不是模型调用，
+只需要证明 CPA 根地址可达。
+
+### 实现
+
+在 `ClaudeMessages` 读取并完成模型 ID 解码后、进入流式/非流式转发分支前，新增一个很窄的
+Claude Desktop 启动探测识别逻辑。只有同时满足以下条件时才本地返回成功：
+
+- `POST /v1/messages`
+- 存在 `Anthropic-Version`
+- `User-Agent` 同时包含 `Claude/` 和 `Electron/`
+- `User-Agent` 不包含 `claude-cli`
+- `model` 以 `claude-` 开头
+- `max_tokens` 等于 `1`
+- `messages` 只有一条
+- 唯一消息为 `role=user` 且 `content="."`
+- `stream` 不存在或为 `false`
+- 不存在 `tools`
+- 不存在 `system`
+
+命中后返回标准 Anthropic Messages 非流式 `Message` 对象，避免进入模型路由和上游转发：
+
+```json
+{
+  "id": "msg_01CPAClaudeDesktopProbe",
+  "type": "message",
+  "role": "assistant",
+  "model": "<request model>",
+  "content": [{"type": "text", "text": "."}],
+  "stop_reason": "max_tokens",
+  "stop_sequence": null,
+  "stop_details": null,
+  "usage": {"input_tokens": 1, "output_tokens": 1}
+}
+```
+
+### 边界
+
+- 后续真实 Claude 调用的 `claude-cli` User-Agent 不会命中该逻辑。
+- 普通对话请求因为 `max_tokens`、消息内容、消息数量或工具/系统字段不同，不会命中该逻辑。
+- 本地成功只表示 CPA 放过 Claude Desktop 启动探测，不代表上游模型、额度或密钥真实可用；真实可用性仍由后续真实请求验证。
+- `HEAD /` 只返回 `200 OK` 空响应；`GET /` 保持原有 JSON 根信息不变。
+
+---
+
 ## 一、新增文件（3 个）
 
 全部位于 `internal/misc/`。升级时直接把这三个文件复制过去即可（内容一般不受官方升级影响）。

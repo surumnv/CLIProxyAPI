@@ -167,6 +167,20 @@ func TestHealthz(t *testing.T) {
 	})
 }
 
+func TestRootHead(t *testing.T) {
+	server := newTestServer(t)
+	req := httptest.NewRequest(http.MethodHead, "/", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if rr.Body.Len() != 0 {
+		t.Fatalf("expected empty body for HEAD request, got %q", rr.Body.String())
+	}
+}
+
 func TestCodexAlphaSearchForwardsRequest(t *testing.T) {
 	server := newTestServer(t)
 	executor := &codexSearchCaptureExecutor{}
