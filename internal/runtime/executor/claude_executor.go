@@ -1047,6 +1047,22 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 	return body, nil
 }
 
+// stripInjectedOAuthBetas removes any oauth beta token (e.g. oauth-2025-04-20)
+// from a comma-separated Anthropic-Beta value, preserving the order and spacing
+// style of the remaining tokens. Used to keep the CPA-injected oauth beta off
+// requests bound for third-party (non-Anthropic) upstreams.
+func stripInjectedOAuthBetas(betas string) string {
+	parts := strings.Split(betas, ",")
+	kept := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if strings.Contains(strings.ToLower(strings.TrimSpace(part)), "oauth") {
+			continue
+		}
+		kept = append(kept, part)
+	}
+	return strings.Join(kept, ",")
+}
+
 func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config) error {
 	if r == nil {
 		return nil
@@ -1087,10 +1103,12 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		}
 	}
 
+	clientBeta := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta"))
+	clientSuppliedOAuth := strings.Contains(strings.ToLower(clientBeta), "oauth")
 	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
-	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
-		baseBetas = val
-		if !strings.Contains(val, "oauth") {
+	if clientBeta != "" {
+		baseBetas = clientBeta
+		if !clientSuppliedOAuth {
 			baseBetas += ",oauth-2025-04-20"
 		}
 	}
@@ -1114,6 +1132,14 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 				existingSet[beta] = true
 			}
 		}
+	}
+	// For third-party (non-Anthropic) bases, drop the oauth beta that CPA injects
+	// itself. The oauth-2025-04-20 beta only matters to Anthropic's own OAuth
+	// upstream; forwarding it to a third-party relay that authenticates with an API
+	// key is a needless fingerprint that real Claude Desktop never sends. A beta the
+	// client supplied on its own is a genuine passthrough and is left untouched.
+	if !isAnthropicBase && !clientSuppliedOAuth {
+		baseBetas = stripInjectedOAuthBetas(baseBetas)
 	}
 	r.Header.Set("Anthropic-Beta", baseBetas)
 
@@ -1157,6 +1183,25 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	} else {
 		helps.ApplyClaudeLegacyDeviceHeaders(r, ginHeaders, cfg)
 	}
+	// Best-effort passthrough of remaining inbound Claude Desktop headers (e.g. the
+	// X-Stainless-* device fingerprint, X-Claude-Code-Session-Id, and any header a
+	// future Desktop release adds). Authoritative headers set above are already
+	// present on r and CopyInboundHeaders never clobbers them; hop-by-hop, length,
+	// host and Accept-Encoding are dropped by the copier's own denylist. The skip
+	// list below keeps CPA in control of the headers it must own:
+	//   - Authorization / X-Api-Key: must carry the proxy credential, never the
+	//     inbound token (and Anthropic+API-key mode deliberately drops Authorization).
+	//   - Anthropic-Beta: rewritten above (oauth injection / third-party stripping).
+	//   - Accept: stream vs non-stream is authoritative.
+	//   - Anthropic-Dangerous-Direct-Browser-Access: OAuth mode intentionally omits
+	//     it, so it must not be resurrected from the inbound request.
+	util.CopyInboundHeaders(r, ginHeaders,
+		"Authorization",
+		"X-Api-Key",
+		"Anthropic-Beta",
+		"Accept",
+		"Anthropic-Dangerous-Direct-Browser-Access",
+	)
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes

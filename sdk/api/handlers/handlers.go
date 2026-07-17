@@ -559,6 +559,19 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	}
 	newCtx, cancel := context.WithCancel(parentCtx)
 
+	// Propagate the inbound HTTP/1.1 header order captured on the downstream
+	// connection (attached to c.Request.Context() by the server's ConnContext
+	// hook) onto the executor context. newCtx is rooted at parentCtx, which is
+	// context.Background() for provider handlers, so without this the ordered-h1
+	// round tripper would never see the order and would fall back to Go's
+	// alphabetical header writer. This makes header-order preservation work for
+	// all providers (Claude included), not just the bespoke Codex path.
+	if requestCtx != nil {
+		if order := util.OriginalHeaderOrderFromContext(requestCtx); order != nil {
+			newCtx = util.WithOriginalHeaderOrder(newCtx, order)
+		}
+	}
+
 	endpoint := ""
 	if c != nil && c.Request != nil {
 		path := strings.TrimSpace(c.FullPath())

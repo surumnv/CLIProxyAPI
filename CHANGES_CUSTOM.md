@@ -615,3 +615,99 @@ HTTP/1.1 默认也会按标准库自己的规则写头。为了让 CPA 发往上
 - internal/runtime/executor/helps/ordered_h1_round_tripper.go
 - internal/runtime/executor/helps/ordered_h1_round_tripper_test.go
 - CHANGES_CUSTOM.md（本文）
+
+---
+
+# 改动主题四：接通请求头顺序透传并完善 Claude 请求头处理
+
+> 本主题包含三处相对独立的修复，但都围绕“让 Claude Desktop 经 CPA 转发到第三方中转的请求尽量贴近真实客户端”。第 1 条是对**改动主题三**（ae2216f，按 CC Switch 思路保留 HTTP/1.1 请求头顺序）的**补全**——那条 commit 建好了链路两端却漏接了中间一节，导致顺序透传从未真正生效。
+
+## 1. 接通 HTTP/1.1 请求头顺序透传（补全 ae2216f / 改动主题三）
+
+**问题**：改动主题三（commit ae2216f）建立了顺序透传的四个部件里的三个：
+
+1. 入站捕获：`headerOrderConn`（`internal/api/header_order_conn.go`）
+2. 挂到连接 context：`server.go` 的 `ConnContext`，挂到 **`c.Request.Context()`**
+3. 出站按序写：`orderedH1RoundTripper`（`ordered_h1_round_tripper.go`），从 **`req.Context()`** 取顺序
+
+但**漏接了第 4 节**：把顺序从 `c.Request.Context()` 传递到执行器出站请求所用的 ctx。
+
+所有 provider handler 走 `h.GetContextWithCancel(h, c, context.Background())`（`sdk/api/handlers/handlers.go`），该函数把执行器 ctx 派生自传入的 `context.Background()`（`parentCtx`），只复制了 request ID，**捕获到的 `OriginalHeaderOrder` 在此丢失**。于是 `orderedH1RoundTripper.canUseOrderedH1` 恒为 false，出站一直回落到 Go 的字母序写头。
+
+**因此顺序透传自 ae2216f 落地起对所有走主转发路径的 provider（含 Codex 主路径与 Claude）从未真正生效**。唯一例外是 `codexAlphaSearch` 旁路端点（`server.go`），它自行写了 `context.WithValue(c.Request.Context(), "gin", c)`，误打误撞派生自 `c.Request.Context()` 而侥幸可用——但那不是通用路径。测试之所以没暴露该问题，是因为 `ordered_h1_round_tripper_test.go` 用 `util.WithOriginalHeaderOrder(context.Background(), order)` 手工注入顺序，绕过了真实的 handler → executor context 传递，没有端到端覆盖。
+
+**修改**：`sdk/api/handlers/handlers.go` 的 `GetContextWithCancel`，在构造 `newCtx` 之后，把入站顺序从 `c.Request.Context()` 传递到执行器 ctx：
+
+```go
+	// Propagate the inbound HTTP/1.1 header order captured on the downstream
+	// connection (attached to c.Request.Context() by the server's ConnContext
+	// hook) onto the executor context. newCtx is rooted at parentCtx, which is
+	// context.Background() for provider handlers, so without this the ordered-h1
+	// round tripper would never see the order and would fall back to Go's
+	// alphabetical header writer. This makes header-order preservation work for
+	// all providers (Claude included), not just the bespoke Codex path.
+	if requestCtx != nil {
+		if order := util.OriginalHeaderOrderFromContext(requestCtx); order != nil {
+			newCtx = util.WithOriginalHeaderOrder(newCtx, order)
+		}
+	}
+```
+
+（`requestCtx` 即函数上文已取好的 `c.Request.Context()`。需确保该文件已 import `internal/util`——官方原文件已有。）
+
+**效果**：一处修复让所有走主转发路径的 provider（含 Codex 主路径与 Claude）的顺序透传同时生效，不再需要每个 provider 各自接线。
+
+## 2. Claude Desktop 入站请求头尽力透传
+
+**问题**：Claude executor 此前是**纯白名单**（逐头 `misc.EnsureHeader` + 设备指纹），白名单外的入站头一律静默丢弃。Codex 早有 `util.CopyInboundHeaders`（见改动主题一第二节第 2 项），Claude 没有——Claude Desktop 升级后新增的任何头都会被吞掉，成为相对真实客户端的指纹缺口。
+
+**修改**：`internal/runtime/executor/claude_executor.go` 的 `applyClaudeHeaders`，在设备指纹/UA（`ApplyClaudeDeviceProfileHeaders` / `ApplyClaudeLegacyDeviceHeaders`）之后、`util.ApplyCustomHeadersFromAttrs` 之前，加入透传：
+
+```go
+	util.CopyInboundHeaders(r, ginHeaders,
+		"Authorization", "X-Api-Key",
+		"Anthropic-Beta",
+		"Accept", "Accept-Encoding",
+		"Anthropic-Dangerous-Direct-Browser-Access",
+	)
+```
+
+- 运行时机保证权威头（UA、鉴权、beta、Accept 等）先设好，`CopyInboundHeaders` 不覆盖 `r` 上已有值，故不会破坏它们。
+- skip 列表让 CPA 对这些头保持权威：`Authorization`/`X-Api-Key`（必须用代理/provider 凭据，不能透传客户端 key）、`Anthropic-Beta`（本函数自行拼装，含 oauth 处理与 extra betas）、`Accept`/`Accept-Encoding`（流式强制 `identity`）、`Anthropic-Dangerous-Direct-Browser-Access`（仅 API-key 模式设置）。
+- hop-by-hop / `Content-Length` / `Host` 等由 `CopyInboundHeaders` 内置的 `passthroughHeaderDenylist` 自动丢弃。
+
+**效果**：Claude Desktop 后续升级新增的任何头自动透传，不必改代码追白名单。
+
+## 3. 第三方 base 去掉 CPA 注入的 `oauth-2025-04-20`
+
+**问题**：`applyClaudeHeaders` 在拼装 `Anthropic-Beta` 时无条件注入 `oauth-2025-04-20`。该 beta 只对 Anthropic 官方 OAuth 上游有意义；对以 API key 认证的第三方中转转发它，是真实 Claude Desktop 不会发送的多余指纹。
+
+**修改**：同文件的 beta 拼装逻辑改为——仅对官方 `api.anthropic.com` 保留注入的 oauth beta；非官方 base 且客户端自己没带 oauth beta 时，剥离掉 CPA 注入的那个：
+
+```go
+	if !isAnthropicBase && !clientSuppliedOAuth {
+		baseBetas = stripInjectedOAuthBetas(baseBetas)
+	}
+	r.Header.Set("Anthropic-Beta", baseBetas)
+```
+
+配套新增 `stripInjectedOAuthBetas`（逗号分隔、大小写不敏感地剔除含 `oauth` 的 token，保留其余顺序）与 `clientSuppliedOAuth`（记录入站 `Anthropic-Beta` 是否本来就含 oauth）。**客户端自带的 oauth beta 视为正常透传，保持不变**，只剥离 CPA 自己注入的那一个。
+
+## 涉及文件清单（本主题）
+
+修改：
+- `sdk/api/handlers/handlers.go`（`GetContextWithCancel` 传递入站顺序——第 1 条，惠及所有 provider）
+- `internal/runtime/executor/claude_executor.go`（`CopyInboundHeaders` 透传——第 2 条；`Anthropic-Beta` oauth 剥离 + `stripInjectedOAuthBetas` 辅助函数——第 3 条）
+
+无需改动 `go.mod` / `go.sum`。
+
+## 验证
+
+```bash
+cd /d/AIProject/CLIProxyAPI
+go build ./...
+go test ./internal/api/... ./internal/runtime/executor/... ./internal/util/...
+```
+构建通过，相关包测试全绿。
+
+> **升级套用提醒**：第 1 条改的是公共层 `GetContextWithCancel`，与 provider 无关，务必在升级后确认这段顺序传递仍在——否则改动主题三的顺序透传会再次“装好但没通电”。第 2、3 条随 Claude executor 走。
