@@ -448,6 +448,13 @@ HTTP/1.1 默认也会按标准库自己的规则写头。为了让 CPA 发往上
 - 原始请求里没有、但 CPA 新增的 header，追加在原始顺序之后。
 - 出站 raw HTTP/1.1 transport 维护按 `scheme://host:port` 分组的空闲连接池；响应 body 读到 EOF 并
   关闭后，连接会回到池中供后续请求复用。若复用到已被上游关闭的旧连接，会自动丢弃并重试一次新连接。
+- 空闲连接有 90s 超时；取出复用前会做 1ms 读探活，过期或半开连接直接丢弃再建新连接。
+- 已知 `Content-Length` 的请求体按流式写出，不再整包 `ReadAll`；仅长度未知的 body 才缓冲后补
+  `Content-Length`。
+- dial / TLS handshake 跟随 `req.Context()` 取消；代理 dialer 优先走 `ContextDialer`，否则用
+  goroutine + select 响应取消。
+- `sharedOrderedH1RoundTripper` 的缓存键同时包含 proxyURL 与 fallback transport 身份，避免不同
+  fallback 误共享同一连接池。
 - 没有捕获到顺序信息时，继续走原有 transport，不改变原行为。
 
 ## 一、新增文件
@@ -466,6 +473,10 @@ HTTP/1.1 默认也会按标准库自己的规则写头。为了让 CPA 发往上
   - request context 中有原始顺序时，手写请求行和 header；再用 `http.ReadResponse` 读取上游响应。
   - 支持直接连接和现有 `proxyutil.BuildDialer` 支持的 HTTP / HTTPS / SOCKS5 代理。
   - 新增空闲连接池和 `CloseIdleConnections`，避免每次 ordered h1 请求都重新 TCP/TLS 握手。
+  - 连接池增加 90s idle timeout + 复用前读探活。
+  - 已知长度 body 流式写出；未知长度 body 才缓冲。
+  - dial/handshake 响应 `req.Context()` 取消。
+  - shared transport 缓存键 = proxyURL + fallback 身份。
 
 ## 二、修改文件
 
@@ -493,3 +504,26 @@ HTTP/1.1 默认也会按标准库自己的规则写头。为了让 CPA 发往上
 - 出站 raw HTTP/1.1 写入时，`Host`、`Authorization`、`Accept-Encoding`、`Content-Type`、`Content-Length`
   使用最终值但保留原始位置。
 - 出站 ordered h1 transport 能在连续请求之间复用同一条上游 HTTP/1.1 连接。
+- 过期空闲连接会被丢弃并新建连接。
+- shared transport 在不同 fallback 下不会误共享。
+- 已知长度请求体可流式写出到上游。
+- dial 在 request context 取消时会失败返回。
+
+---
+
+# 改动主题三补充：ordered HTTP/1.1 transport 稳定性修复
+
+针对出站 ordered H1 路径的四项修复（不改变“保留首个请求 header 顺序”的既定策略）：
+
+1. **空闲连接超时 / 探活**：池中连接超过 90s 不再复用；取出时 1ms Peek 探活，半开连接丢弃。
+2. **shared transport 缓存键**：由仅 proxyURL 改为 proxyURL + fallback 身份，避免不同 fallback
+   共用错误连接池。
+3. **请求体写出**：Content-Length >= 0 已知长度时流式写出；仅未知长度 body 才 ReadAll 缓冲。
+4. **dial 取消**：直连 DialContext(req.Context())；代理 dialer 优先 ContextDialer，否则
+   goroutine + ctx.Done()；HTTPS 握手改用 HandshakeContext。
+
+涉及文件：
+- internal/runtime/executor/helps/ordered_h1_round_tripper.go
+- internal/runtime/executor/helps/ordered_h1_round_tripper_test.go
+- CHANGES_CUSTOM.md（本文）
+
