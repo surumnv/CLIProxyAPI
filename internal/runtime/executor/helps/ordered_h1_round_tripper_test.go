@@ -288,6 +288,67 @@ func TestOrderedH1RoundTripperStreamsKnownLengthBody(t *testing.T) {
 	}
 }
 
+func TestOrderedH1RoundTripperPreservesZeroContentLengthBody(t *testing.T) {
+	t.Parallel()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer ln.Close()
+
+	received := make(chan string, 1)
+	go func() {
+		conn, errAccept := ln.Accept()
+		if errAccept != nil {
+			return
+		}
+		defer conn.Close()
+		req, errRead := http.ReadRequest(bufio.NewReader(conn))
+		if errRead != nil {
+			return
+		}
+		data, _ := io.ReadAll(req.Body)
+		_ = req.Body.Close()
+		received <- string(data)
+		_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+	}()
+
+	rt := newOrderedH1RoundTripper("", nil).(*orderedH1RoundTripper)
+	defer rt.CloseIdleConnections()
+	client := &http.Client{Transport: rt}
+	order := &util.OriginalHeaderOrder{}
+	order.Set([]util.OriginalHeaderLine{
+		{LowerName: "host", RawName: "Host"},
+		{LowerName: "content-length", RawName: "Content-Length"},
+	})
+	ctx := util.WithOriginalHeaderOrder(context.Background(), order)
+
+	payload := "zero-content-length-still-has-body"
+	req, errReq := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+ln.Addr().String()+"/unknown", nil)
+	if errReq != nil {
+		t.Fatalf("NewRequest: %v", errReq)
+	}
+	req.Body = io.NopCloser(strings.NewReader(payload))
+	req.ContentLength = 0
+
+	resp, errDo := client.Do(req)
+	if errDo != nil {
+		t.Fatalf("Do: %v", errDo)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+
+	select {
+	case got := <-received:
+		if got != payload {
+			t.Fatalf("upstream body = %q, want %q", got, payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for upstream body")
+	}
+}
+
 func TestOrderedH1DialRespectsContextCancel(t *testing.T) {
 	t.Parallel()
 

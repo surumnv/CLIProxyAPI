@@ -57,3 +57,4 @@ _bmad-output/*
 ._*
 .gocache/
 build.ps1
+/.gomodcache

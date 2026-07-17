@@ -126,6 +126,10 @@ User-Agent、或缺少客户端头部而拒绝请求。核心手段：
 > 4 处分别在不同的请求构造函数里（流式/非流式等）。升级后用
 > `grep -n 'cli-proxy-openai-compat' openai_compat_executor.go` 找到所有点逐一替换。
 > 确保 import 了 `strings`（官方原文件通常已有）。
+>
+> **注意（改动主题四）**：其中 2 处（`Execute` 与 `ExecuteStream` 的 chat 路径）的
+> `CopyInboundHeaders` 调用现在带 skip 参数，用于在 Responses→Chat 转换时剥离
+> Codex Responses-Lite 头，详见文末「改动主题四」。套用本节时按主题四的最终形态写。
 
 ### 4. `internal/api/handlers/management/api_tools.go`
 三处改动：
@@ -527,3 +531,26 @@ HTTP/1.1 默认也会按标准库自己的规则写头。为了让 CPA 发往上
 - internal/runtime/executor/helps/ordered_h1_round_tripper_test.go
 - CHANGES_CUSTOM.md（本文）
 
+---
+
+# 改动主题三补充二：ordered HTTP/1.1 transport 请求体与连接复用修复
+
+本次只修两个 ordered H1 transport 问题，其他已知问题暂不处理。
+
+1. **修复 `ContentLength == 0` 误判空 body**：
+   `Body != nil && ContentLength == 0` 在 Go 客户端请求里表示“正文长度未知”，不能直接当成“没有正文”。
+   `openOrderedH1RequestBody` 不再因为 `ContentLength == 0` 提前返回空 body；这类请求现在会进入未知长度 body 的缓冲路径，
+   读取真实正文后补出正确的 `Content-Length`，避免流式或自定义 `Reader` 的请求体被静默丢弃。
+
+2. **放宽空闲连接复用前探活**：
+   原先复用空闲连接前每次都用 1ms read deadline 做 `Peek(1)` 探活。Windows localhost 等环境下 1ms 阈值偏紧，
+   容易把可用连接误判为失活，导致复用率下降和额外重连。现在探活超时放宽到 25ms，并且刚入池不足 100ms 的连接
+   在已满足 reader 无缓冲数据、未超过 idle timeout 的前提下直接复用；若连接实际已关闭，后续写入失败仍会走既有的一次重试逻辑。
+
+测试补充：
+- 新增 `TestOrderedH1RoundTripperPreservesZeroContentLengthBody`，覆盖 `Body != nil && ContentLength == 0` 时上游仍能收到正文。
+
+涉及文件：
+- internal/runtime/executor/helps/ordered_h1_round_tripper.go
+- internal/runtime/executor/helps/ordered_h1_round_tripper_test.go
+- CHANGES_CUSTOM.md（本文）

@@ -24,7 +24,8 @@ import (
 const (
 	orderedH1MaxIdlePerKey = 2
 	orderedH1IdleTimeout   = 90 * time.Second
-	orderedH1ProbeTimeout  = time.Millisecond
+	orderedH1ProbeTimeout  = 25 * time.Millisecond
+	orderedH1ProbeMinIdle  = 100 * time.Millisecond
 )
 
 type orderedH1RoundTripper struct {
@@ -199,9 +200,6 @@ func (t *orderedH1RoundTripper) roundTripAttempt(req *http.Request, lines []util
 // ownsBody is true when the caller must Close the returned reader.
 func openOrderedH1RequestBody(req *http.Request) (body io.ReadCloser, contentLength int64, ownsBody bool, err error) {
 	if req == nil || req.Body == nil || req.Body == http.NoBody {
-		return nil, 0, false, nil
-	}
-	if req.ContentLength == 0 {
 		return nil, 0, false, nil
 	}
 	if req.ContentLength > 0 {
@@ -633,6 +631,9 @@ func (c *orderedH1PersistConn) alive() bool {
 	if c.reader.Buffered() != 0 {
 		return false
 	}
+	if !c.idleAt.IsZero() && time.Since(c.idleAt) < orderedH1ProbeMinIdle {
+		return true
+	}
 	if errDeadline := c.conn.SetReadDeadline(time.Now().Add(orderedH1ProbeTimeout)); errDeadline != nil {
 		return false
 	}
@@ -752,4 +753,3 @@ func hasConnectionClose(headers http.Header) bool {
 	}
 	return false
 }
-
