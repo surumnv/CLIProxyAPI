@@ -446,6 +446,8 @@ HTTP/1.1 默认也会按标准库自己的规则写头。为了让 CPA 发往上
   host，`Content-Length` 写当前 body 长度，`Authorization` / `Accept-Encoding` / `Content-Type`
   写 CPA 改写后的值。
 - 原始请求里没有、但 CPA 新增的 header，追加在原始顺序之后。
+- 出站 raw HTTP/1.1 transport 维护按 `scheme://host:port` 分组的空闲连接池；响应 body 读到 EOF 并
+  关闭后，连接会回到池中供后续请求复用。若复用到已被上游关闭的旧连接，会自动丢弃并重试一次新连接。
 - 没有捕获到顺序信息时，继续走原有 transport，不改变原行为。
 
 ## 一、新增文件
@@ -463,6 +465,7 @@ HTTP/1.1 默认也会按标准库自己的规则写头。为了让 CPA 发往上
   - 新增 HTTP/1.1 raw RoundTripper。
   - request context 中有原始顺序时，手写请求行和 header；再用 `http.ReadResponse` 读取上游响应。
   - 支持直接连接和现有 `proxyutil.BuildDialer` 支持的 HTTP / HTTPS / SOCKS5 代理。
+  - 新增空闲连接池和 `CloseIdleConnections`，避免每次 ordered h1 请求都重新 TCP/TLS 握手。
 
 ## 二、修改文件
 
@@ -489,3 +492,4 @@ HTTP/1.1 默认也会按标准库自己的规则写头。为了让 CPA 发往上
 - 连接包装在读取时捕获首个请求头顺序。
 - 出站 raw HTTP/1.1 写入时，`Host`、`Authorization`、`Accept-Encoding`、`Content-Type`、`Content-Length`
   使用最终值但保留原始位置。
+- 出站 ordered h1 transport 能在连续请求之间复用同一条上游 HTTP/1.1 连接。
