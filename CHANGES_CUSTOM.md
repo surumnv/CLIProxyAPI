@@ -430,3 +430,62 @@ go build ./...
 go test ./internal/config/... ./internal/api/handlers/management/...
 ```
 两个包测试均通过。
+
+---
+
+# 改动主题三：按 CC Switch 思路保留 HTTP/1.1 请求头顺序
+
+**背景**：Go 的 `net/http` 在入站解析后会把请求头放进 `http.Header` map，原始 wire 顺序会丢失；出站
+HTTP/1.1 默认也会按标准库自己的规则写头。为了让 CPA 发往上游的 HTTP/1.1 请求尽量沿用真实客户端的
+头部顺序，本次按 CC Switch 的思路增加“入站记录原始顺序 + 出站按该顺序写最终值”的链路。
+
+**核心规则**：
+- 入站只记录每条 HTTP/1.1 连接首个请求的 header 名顺序和原始大小写。
+- 出站仍以 CPA 最终生成的 `http.Request.Header` 为值来源。
+- 原始请求里有、但入站后被 CPA 丢弃并重新生成的字段，也用原始位置写最终值。例如 `Host` 写当前上游
+  host，`Content-Length` 写当前 body 长度，`Authorization` / `Accept-Encoding` / `Content-Type`
+  写 CPA 改写后的值。
+- 原始请求里没有、但 CPA 新增的 header，追加在原始顺序之后。
+- 没有捕获到顺序信息时，继续走原有 transport，不改变原行为。
+
+## 一、新增文件
+
+- `internal/util/header_order.go`
+  - 新增 `OriginalHeaderOrder` / `OriginalHeaderLine`。
+  - 新增 `ParseOriginalHeaderOrder`，从原始 HTTP/1.x 请求头字节中提取 header 名顺序。
+  - 新增 context 读写函数，供 `api` 捕获层和 executor 出站层共享。
+
+- `internal/api/header_order_conn.go`
+  - 新增 `headerOrderConn`，包装 `net.Conn.Read`。
+  - 标准库读取入站请求时同步收集首个请求头块，解析完成后放进 `OriginalHeaderOrder`。
+
+- `internal/runtime/executor/helps/ordered_h1_round_tripper.go`
+  - 新增 HTTP/1.1 raw RoundTripper。
+  - request context 中有原始顺序时，手写请求行和 header；再用 `http.ReadResponse` 读取上游响应。
+  - 支持直接连接和现有 `proxyutil.BuildDialer` 支持的 HTTP / HTTPS / SOCKS5 代理。
+
+## 二、修改文件
+
+- `internal/api/server.go`
+  - 给 `http.Server` 增加 `ConnContext`，把 `headerOrderConn` 中的 `OriginalHeaderOrder` 放入 request context。
+
+- `internal/api/protocol_multiplexer.go`
+  - HTTP/1.1 连接进入 `http.Server` 前包上 `headerOrderConn`。
+  - TLS 入站时只对 ALPN 为 `http/1.1` 的连接记录顺序；HTTP/2 不走该逻辑。
+
+- `internal/runtime/executor/helps/utls_client.go`
+  - 把非 protected host 的 fallback transport 包成 ordered HTTP/1.1 transport。
+  - `api.anthropic.com`、`chatgpt.com` 仍按原 protected host 逻辑走 utls/http2，不受本次 h1 顺序写入影响。
+
+## 三、测试
+
+新增：
+- `internal/util/header_order_test.go`
+- `internal/api/header_order_conn_test.go`
+- `internal/runtime/executor/helps/ordered_h1_round_tripper_test.go`
+
+覆盖：
+- 原始 header 顺序和大小写解析。
+- 连接包装在读取时捕获首个请求头顺序。
+- 出站 raw HTTP/1.1 写入时，`Host`、`Authorization`、`Accept-Encoding`、`Content-Type`、`Content-Length`
+  使用最终值但保留原始位置。

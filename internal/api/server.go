@@ -404,6 +404,14 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.server = &http.Server{
 		Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
 		Handler: engine,
+		ConnContext: func(ctx context.Context, conn net.Conn) context.Context {
+			if ordered, ok := conn.(interface {
+				OriginalHeaderOrder() *util.OriginalHeaderOrder
+			}); ok {
+				return util.WithOriginalHeaderOrder(ctx, ordered.OriginalHeaderOrder())
+			}
+			return ctx
+		},
 	}
 
 	return s

@@ -171,14 +171,17 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 
 	var utlsRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
 	var standardTransport http.RoundTripper = http.DefaultTransport
+	var orderedProxyURL string
 	if proxyURL != "" {
 		if transport := buildProxyTransport(proxyURL); transport != nil {
 			standardTransport = transport
+			orderedProxyURL = proxyURL
 		}
 	} else if ctxRoundTripper != nil {
 		utlsRT = ctxRoundTripper
 		standardTransport = ctxRoundTripper
 	}
+	standardTransport = newOrderedH1RoundTripper(orderedProxyURL, standardTransport)
 
 	client := &http.Client{
 		Transport: &fallbackRoundTripper{

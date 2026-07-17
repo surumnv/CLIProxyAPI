@@ -82,7 +82,11 @@ func (s *Server) routeMuxConnection(conn net.Conn, httpListener *muxListener) {
 				}
 				return
 			}
-			if errPut := httpListener.Put(tlsConn); errPut != nil {
+			httpConn := net.Conn(tlsConn)
+			if proto == "http/1.1" {
+				httpConn = newHeaderOrderConn(tlsConn)
+			}
+			if errPut := httpListener.Put(httpConn); errPut != nil {
 				if errClose := conn.Close(); errClose != nil {
 					log.Errorf("failed to close connection after HTTP routing failure: %v", errClose)
 				}
@@ -115,7 +119,8 @@ func (s *Server) routeMuxConnection(conn net.Conn, httpListener *muxListener) {
 		return
 	}
 
-	if errPut := httpListener.Put(&bufferedConn{Conn: conn, reader: reader}); errPut != nil {
+	httpConn := newHeaderOrderConn(&bufferedConn{Conn: conn, reader: reader})
+	if errPut := httpListener.Put(httpConn); errPut != nil {
 		if errClose := conn.Close(); errClose != nil {
 			log.Errorf("failed to close connection after HTTP routing failure: %v", errClose)
 		}
