@@ -939,3 +939,164 @@ ordered H1 并发部分靠人工审查连接池加锁纪律。）
 
 > **升级套用提醒**：本主题全是对既有自定义代码的修补，随对应文件走。第 3、4 条是 ordered H1 的正确性/
 > 内存关键修复，升级后务必确认仍在。
+
+---
+
+## 追加改动：可选 SChannel 出站 TLS，使 JA3 与 Codex CLI 一致
+
+### 修改 / 新增文件
+
+新增：
+- `internal/schannel/schannel_windows.go`（常量、`SCHANNEL_CRED` 结构体含 amd64 显式对齐、`Config`）
+- `internal/schannel/conn_windows.go`（SSPI 握手 + 收发的 `net.Conn` 实现、ALPN 缓冲构造）
+- `internal/runtime/executor/helps/ordered_h1_tls_windows.go`（Windows 分支：可选走 SChannel）
+- `internal/runtime/executor/helps/ordered_h1_tls_other.go`（非 Windows 分支：始终标准 crypto/tls）
+- `internal/runtime/executor/helps/ordered_h1_schannel_ja3_windows_test.go`（实弹 JA3 匹配测试，`RUN_SCHANNEL_JA3=1` 触发）
+- `cmd/schannelprobe/main.go`（独立 JA3 探针，用于抓取/比对）
+
+修改：
+- `internal/config/config.go`（新增顶层开关 `schannel-tls`，默认 false）
+- `internal/runtime/executor/helps/ordered_h1_round_tripper.go`（`getConn` 的握手抽出为 `handshakeOrderedH1TLS`）
+- `internal/runtime/executor/helps/utls_client.go`（`NewUtlsHTTPClient` 按 `cfg.SChannelTLS` 置位开关）
+
+### 背景
+
+主题四（伪装成真实 Codex 客户端）此前只覆盖到**应用层**：UA、请求头、头顺序透传。但 **TLS 层**仍是短板——
+CPA 出站用 Go `crypto/tls`，其 JA3 与 Codex 属不同族。Codex CLI 用 reqwest + native-tls，在 Windows 上即
+SChannel（legacy `SCHANNEL_CRED`，故最高 TLS 1.2、无 GREASE）。上游 relay 若比对 JA3，会发现「UA 自称
+Codex、TLS 指纹却是 Go」这一矛盾。本改动补齐 TLS 层，使出站 ClientHello / JA3 与本机 Codex 逐位一致。
+
+### 实现（路径 1：SChannel 只做加密层）
+
+以 SSPI（`secur32.dll`）手写一个由 SChannel 支撑的 `net.Conn`：`AcquireCredentialsHandleW` +
+`InitializeSecurityContextW` 完成握手（产出与 Codex 一致的 ClientHello），`EncryptMessage` /
+`DecryptMessage` 负责收发。它**只替换 TLS 加密层**——HTTP/1.1 请求头仍由 ordered-h1 按入站顺序写到这个
+加密 conn 上，**头顺序透传行为完全不变**。
+
+`getConn` 原先内联的 `tls.Client` 抽成 `handshakeOrderedH1TLS`，按 build tag 分流：Windows 且
+`schannel-tls: true` 时走 SChannel，否则回退标准 `crypto/tls`。开关默认关闭，非 Windows 平台忽略。
+anthropic / chatgpt 仍走既有 utls 路径，不受影响。
+
+### 指纹校验
+
+Codex v0.144.5 实测 JA3（经 check.ja3.zone 直连抓取）：
+```
+771,49196-49195-49200-49199-49188-49187-49192-49191-49162-49161-49172-49171-157-156-61-60-53-47,0-10-11-13-35-23-65281,29-23-24,0
+hash: 6a5d235ee78c6aede6a61448b4e9ff1e
+```
+密码套件、椭圆曲线（`29-23-24`）、版本（`771`）在同机 SChannel 下天然一致；唯一差异是扩展 `16`（ALPN）——
+Codex **不发** ALPN，故 `ALPNProtocols` 留空即逐位对齐。经 `NewUtlsHTTPClient(SChannelTLS:true)` →
+ordered-h1 → SChannel 的**完整生产路径**实测复现同一 hash。
+
+### 依赖说明
+
+用到 `golang.org/x/sys/windows`，官方已在 `go.mod`（`golang.org/x/sys v0.47.0`），无需改动 `go.mod` / `go.sum`。
+
+### 前端配套
+
+管理面板「配置面板 → 高级 → Codex 请求头伪装」子区新增「SChannel 出站 TLS（匹配 Codex JA3）」开关，
+对应顶层 YAML 键 `schannel-tls`。详见前端仓库 `CHANGES_CUSTOM.md`。
+
+### 验证
+
+```bash
+cd /d/AIProject/CLIProxyAPI
+GOOS=windows go build ./...          # Windows
+GOOS=linux   go build ./...          # 非 Windows 分支
+go vet ./internal/schannel/... ./internal/runtime/executor/helps/...
+go test ./internal/runtime/executor/helps/...     # ordered-h1 单测全绿，头顺序保护未受影响
+RUN_SCHANNEL_JA3=1 go test ./internal/runtime/executor/helps/ -run SChannelMatchesCodexJA3  # 实弹匹配（需联网）
+```
+Windows + Linux 均编译通过，`go vet` 仅一处良性 `unsafe.Pointer`（OS 持有的缓冲），ordered-h1 单测全绿。
+
+> **升级套用提醒**：SChannel 层默认关闭，是纯增量。`getConn` 的握手已改为 `handshakeOrderedH1TLS`，升级后
+> 若官方重写该函数，需把这一层重新接回。
+
+---
+
+# 改动主题七：OpenAI 兼容出站保留请求头顺序 + SChannel 收窄到仅 Codex 源
+
+> 本主题两处改动作用域不同：
+> - **A（头顺序）**：作用于**所有** OpenAI 兼容出站，无条件启用（靠 ctx 里有无捕获的头顺序自动生效/回退）。
+> - **B（SChannel 收窄）**：只作用于 **Codex 源**（含 Codex→OpenAI 兼容路径），把原先的进程级全局开关改为**按请求**在 context 上打标。
+
+## A. OpenAI 兼容出站接入 ordered HTTP/1.1 头顺序
+
+### 背景
+
+改动主题三/四建好了「入站捕获头顺序 → context 透传 → ordered-h1 出站按序写入」链路，但 Codex/Claude executor
+走的是 `NewUtlsHTTPClient`（内部包了 ordered-h1），而 **OpenAI 兼容 executor 走的是 `NewProxyAwareHTTPClient`**
+（普通 `http.Transport`，HTTP/2 + 字母序头），因此经 OpenAI 兼容供应商转发时头顺序**从未被保留**。
+
+### 实现
+
+新增 `helps.NewOrderedH1ProxyClient(ctx, cfg, auth, timeout)`（`internal/runtime/executor/helps/proxy_helpers.go`）：
+代理优先级与 `NewProxyAwareHTTPClient` 完全一致（`auth.ProxyURL` → `cfg.ProxyURL` → ctx roundtripper），
+但把 transport 用 `sharedOrderedH1RoundTripper` 包一层，强制 HTTP/1.1 并按 context 里捕获的顺序写头。
+**不含 utls 指纹层**（OpenAI 兼容供应商打的是任意第三方 base，从不打 utls 保护的
+`api.anthropic.com` / `chatgpt.com`）。context 里无捕获顺序时，ordered-h1 透明回退到被包的 transport，
+因此对每个请求都安全。
+
+`openai_compat_executor.go` 中 **5 处** `NewProxyAwareHTTPClient` 全部替换为 `NewOrderedH1ProxyClient`
+（Execute / executeImages / ExecuteStream / executeImagesStream / HttpRequest），`reporter.TrackHTTPClient`
+包裹保持不变。
+
+### 取舍
+
+这些出站从可能的 HTTP/2 降级为 HTTP/1.1（头顺序保留只在 h1.1 成立；Codex/Claude 本就如此）。
+
+## B. SChannel 开关从进程级全局改为按请求 context 门控
+
+### 背景
+
+改动主题六追加的 SChannel 出站 TLS，原实现是在 `NewUtlsHTTPClient` 里按 `cfg.SChannelTLS` 置一个**进程级全局**
+原子标志，ordered-h1 握手时读它。问题：这会让**所有**经 ordered-h1 出站的源（Claude、Gemini 等）都套用
+Codex 的 SChannel JA3，指纹张冠李戴；且是全局状态，非按请求。
+
+### 实现
+
+1. `sdk/cliproxy/executor/context.go`：新增 `WithSChannelTLS(ctx)` / `SChannelTLSFromContext(ctx)`
+   （照搬既有 `WithDownstreamWebsocket` 模式）。
+2. `internal/runtime/executor/helps/utls_client.go`：删除 `NewUtlsHTTPClient` 里的全局 `setSchannelTLSEnabled`。
+3. `internal/runtime/executor/helps/ordered_h1_tls_windows.go` / `..._other.go`：`handshakeOrderedH1TLS` 去掉全局
+   原子标志，改从 `req.Context()`（已作为参数传入）读 `SChannelTLSFromContext`。非 Windows 分支忽略该标记。
+4. `internal/runtime/executor/schannel_gate.go`（新增）：`maybeMarkSChannelTLS(ctx, cfg, opts)`，
+   仅当 `cfg.SChannelTLS` 为真**且** `opts.SourceFormat == "codex"` 时给 ctx 打标。
+5. 打标点：`codex_executor.go` 的 Execute / executeCompact / ExecuteStream，以及 `openai_compat_executor.go`
+   的 Execute / executeImages / ExecuteStream / executeImagesStream（覆盖 Codex→OpenAI 兼容路径）。
+   `HttpRequest` 转发打的是 `chatgpt.com`（走 utls，非 ordered-h1），无需打标。
+
+结果：SChannel 指纹只落在 Codex 源流量上；Claude/Gemini 等仍走标准 `crypto/tls`。前端开关文案与 YAML 键
+（`schannel-tls`）不变。
+
+## 涉及文件清单（本主题）
+
+新增：
+- `sdk/cliproxy/executor/context.go`（新增两个 helper，追加到既有文件）
+- `internal/runtime/executor/schannel_gate.go`
+- `internal/runtime/executor/schannel_gate_test.go`
+- `internal/runtime/executor/helps/ordered_h1_proxy_client_test.go`
+
+修改：
+- `internal/runtime/executor/helps/proxy_helpers.go`（新增 `NewOrderedH1ProxyClient`）
+- `internal/runtime/executor/helps/utls_client.go`（删除全局 SChannel 置位）
+- `internal/runtime/executor/helps/ordered_h1_tls_windows.go` / `ordered_h1_tls_other.go`（改从 ctx 读标记）
+- `internal/runtime/executor/helps/ordered_h1_schannel_ja3_windows_test.go`（实弹测试改为在 ctx 上打 `WithSChannelTLS`）
+- `internal/runtime/executor/openai_compat_executor.go`（5 处出站换 client + 打标）
+- `internal/runtime/executor/codex_executor.go`（3 处执行入口打标）
+
+## 验证
+
+```bash
+cd /d/AIProject/CLIProxyAPI
+GOOS=windows go build ./...
+GOOS=linux   go build ./...
+go vet ./internal/runtime/executor/... ./sdk/cliproxy/executor/...
+go test ./internal/runtime/executor/...   # 含新增：compat 头顺序保留 + 回退、SChannel 仅 codex 源打标
+```
+Windows + Linux 均编译通过，`go vet` 干净，全部单测绿。
+
+> **升级套用提醒**：A 的核心是「compat 5 处 `NewProxyAwareHTTPClient` → `NewOrderedH1ProxyClient`」，
+> 升级后用 `grep 'NewProxyAwareHTTPClient' openai_compat_executor.go` 复核是否被官方改回。
+> B 依赖 `handshakeOrderedH1TLS` 从 `req.Context()` 读标记，与主题六的「握手已改为 handshakeOrderedH1TLS」联动，
+> 若官方重写握手需一并接回 ctx 读取。

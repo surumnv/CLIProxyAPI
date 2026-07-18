@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -331,8 +330,8 @@ func (t *orderedH1RoundTripper) getConn(req *http.Request) (*orderedH1PersistCon
 		return nil, false, errDial
 	}
 	if req.URL.Scheme == "https" {
-		tlsConn := tls.Client(conn, &tls.Config{ServerName: req.URL.Hostname()})
-		if errHandshake := tlsConn.HandshakeContext(req.Context()); errHandshake != nil {
+		tlsConn, errHandshake := handshakeOrderedH1TLS(req.Context(), conn, req.URL.Hostname())
+		if errHandshake != nil {
 			if errClose := conn.Close(); errClose != nil {
 				return nil, false, fmt.Errorf("ordered h1 TLS handshake failed: %w; close failed: %v", errHandshake, errClose)
 			}

@@ -164,6 +164,12 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 
+	// Whether the ordered-h1 transport routes its handshake through the Windows
+	// SChannel provider (matching the Codex CLI JA3) is now decided per-request
+	// from the context (executor.WithSChannelTLS), set only for Codex-originated
+	// requests when the schannel-tls toggle is on. Default-off; ignored on
+	// non-Windows.
+
 	var ctxRoundTripper http.RoundTripper
 	if ctx != nil {
 		ctxRoundTripper, _ = ctx.Value("cliproxy.roundtripper").(http.RoundTripper)

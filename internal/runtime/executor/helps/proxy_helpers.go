@@ -61,6 +61,67 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	return httpClient
 }
 
+// NewOrderedH1ProxyClient builds an HTTP client with the same proxy priority as
+// NewProxyAwareHTTPClient (auth.ProxyURL → cfg.ProxyURL → ctx RoundTripper) but
+// wraps the resulting transport with the shared ordered-HTTP/1.1 round tripper.
+// This preserves the inbound header order on the outbound request (forcing
+// HTTP/1.1, which is a prerequisite for header-order preservation). When the
+// context carries no captured header order, ordered-h1 transparently falls back
+// to the wrapped transport, so this is safe for every request.
+//
+// Unlike NewUtlsHTTPClient it does not add the utls Chrome fingerprint layer:
+// OpenAI-compatible providers target arbitrary third-party bases, never the
+// utls-protected hosts (api.anthropic.com / chatgpt.com). SChannel TLS, when
+// enabled, is decided per-request from the context inside the ordered-h1
+// handshake, so no toggle is published here.
+func NewOrderedH1ProxyClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+	httpClient := &http.Client{}
+	if timeout > 0 {
+		httpClient.Timeout = timeout
+	}
+
+	var proxyURL string
+	if auth != nil {
+		proxyURL = strings.TrimSpace(auth.ProxyURL)
+	}
+	if proxyURL == "" && cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+	}
+
+	var ctxRoundTripper http.RoundTripper
+	if ctx != nil {
+		ctxRoundTripper, _ = ctx.Value("cliproxy.roundtripper").(http.RoundTripper)
+	}
+
+	var baseTransport http.RoundTripper = http.DefaultTransport
+	var orderedProxyURL string
+	wrapOrdered := true
+	if proxyURL != "" {
+		if transport := buildProxyTransport(proxyURL); transport != nil {
+			baseTransport = transport
+			orderedProxyURL = proxyURL
+		} else {
+			log.Debugf("failed to setup proxy from URL: %s, falling back to context transport", proxyutil.Redact(proxyURL))
+			if ctxRoundTripper != nil {
+				baseTransport = ctxRoundTripper
+				wrapOrdered = false
+			}
+		}
+	} else if ctxRoundTripper != nil {
+		// A custom context RoundTripper (e.g. from RoundTripperFor) is used
+		// verbatim, mirroring NewUtlsHTTPClient, rather than being wrapped.
+		baseTransport = ctxRoundTripper
+		wrapOrdered = false
+	}
+
+	if wrapOrdered {
+		httpClient.Transport = sharedOrderedH1RoundTripper(orderedProxyURL, baseTransport)
+	} else {
+		httpClient.Transport = baseTransport
+	}
+	return httpClient
+}
+
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.
 // It supports SOCKS5, HTTP, and HTTPS proxy protocols.
 //

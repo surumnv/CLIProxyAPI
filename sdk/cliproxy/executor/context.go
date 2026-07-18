@@ -21,3 +21,27 @@ func DownstreamWebsocket(ctx context.Context) bool {
 	enabled, ok := raw.(bool)
 	return ok && enabled
 }
+
+type schannelTLSContextKey struct{}
+
+// WithSChannelTLS marks the current outbound request to perform its
+// ordered-HTTP/1.1 TLS handshake via the Windows SChannel provider (matching
+// the Codex CLI JA3). It is only set for Codex-originated requests when the
+// schannel-tls config toggle is on; other sources keep the standard crypto/tls
+// path. Ignored on non-Windows platforms.
+func WithSChannelTLS(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, schannelTLSContextKey{}, true)
+}
+
+// SChannelTLSFromContext reports whether the current request opted into the
+// SChannel-backed TLS handshake via WithSChannelTLS.
+func SChannelTLSFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	enabled, ok := ctx.Value(schannelTLSContextKey{}).(bool)
+	return ok && enabled
+}
