@@ -97,6 +97,14 @@ func Capture(opts CaptureOptions) (*CaptureResult, error) {
 		// briefly still hold a handle to its cwd, so retry a few times before
 		// giving up (an empty temp dir left behind is harmless, not fatal).
 		defer func() { removeWithRetry(tmp) }()
+		// claude also writes a session transcript under
+		// ~/.claude/projects/<encoded-cwd>/ keyed by the cwd it launched with.
+		// That directory is NOT covered by the ~/.claude.json restore, so remove
+		// it too or repeated captures would slowly accumulate transcript dirs.
+		// We only do this for the temp dir we created — its name always contains
+		// the unique "claude-ja3-capture-<n>" marker, so it can never collide with
+		// a real project's transcript directory.
+		defer func() { removeCaptureTranscriptDir(tmp) }()
 	}
 
 	if opts.ApproveAPIKey {
@@ -346,6 +354,52 @@ func removeWithRetry(dir string) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+// removeCaptureTranscriptDir deletes the ~/.claude/projects/<encoded> transcript
+// directory that claude creates for the given launch cwd, so captures don't leave
+// session records behind. claude derives the directory name by replacing every
+// character of the absolute cwd that is not an ASCII letter or digit with '-'
+// (e.g. "C:\Users\me\...\claude-ja3-capture-42" -> "C--Users-me-...-claude-ja3-capture-42").
+// cwd must be a capture temp dir (its name carries the unique "claude-ja3-capture-"
+// marker); this never touches a real project's transcripts. Best-effort: any error
+// (no HOME, dir absent, still-locked) is ignored, and a missing dir is not created.
+func removeCaptureTranscriptDir(cwd string) {
+	abs, err := filepath.Abs(cwd)
+	if err != nil {
+		return
+	}
+	// Guard: only ever remove our own capture dirs, never anything else.
+	if !strings.Contains(filepath.Base(abs), "claude-ja3-capture-") {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return
+	}
+	encoded := encodeClaudeProjectDir(abs)
+	target := filepath.Join(home, ".claude", "projects", encoded)
+	if _, statErr := os.Stat(target); statErr != nil {
+		return // nothing to clean
+	}
+	removeWithRetry(target)
+}
+
+// encodeClaudeProjectDir mirrors how claude names ~/.claude/projects entries:
+// every rune that is not an ASCII letter or digit becomes '-'. Verified against
+// live entries (drive colon, path separators, dots and underscores all map to '-').
+func encodeClaudeProjectDir(absPath string) string {
+	var b strings.Builder
+	b.Grow(len(absPath))
+	for _, r := range absPath {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
 }
 
 func readFull(conn net.Conn, buf []byte) (int, error) {
