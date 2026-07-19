@@ -866,6 +866,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/api-call", s.mgmt.APICall)
 		mgmt.POST("/api-call/refresh-user-agent", s.mgmt.RefreshAPICallUserAgent)
 
+		mgmt.GET("/claude-ja3", s.mgmt.GetClaudeJA3)
+		mgmt.PUT("/claude-ja3", s.mgmt.PutClaudeJA3)
+		mgmt.PATCH("/claude-ja3", s.mgmt.PutClaudeJA3)
+		mgmt.DELETE("/claude-ja3", s.mgmt.DeleteClaudeJA3)
+		mgmt.POST("/claude-ja3/capture", s.mgmt.CaptureClaudeJA3)
+
 		mgmt.GET("/quota-exceeded/switch-project", s.mgmt.GetSwitchProject)
 		mgmt.PUT("/quota-exceeded/switch-project", s.mgmt.PutSwitchProject)
 		mgmt.PATCH("/quota-exceeded/switch-project", s.mgmt.PutSwitchProject)

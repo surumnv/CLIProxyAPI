@@ -22,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/fingerprint"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -536,6 +537,12 @@ func main() {
 		return
 	} else {
 		cfg.AuthDir = resolvedAuthDir
+	}
+	// Load the persisted Claude TLS fingerprint (if any) so outbound requests can
+	// reproduce the captured Claude Code ClientHello. A missing/invalid file is
+	// non-fatal: forwarding falls back to the default (Chrome) fingerprint.
+	if _, errFp := fingerprint.Init(cfg.AuthDir); errFp != nil {
+		log.Warnf("failed to load Claude TLS fingerprint: %v", errFp)
 	}
 	managementasset.SetCurrentConfig(cfg)
 

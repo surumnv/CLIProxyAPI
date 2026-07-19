@@ -10,6 +10,7 @@ import (
 
 	tls "github.com/refraction-networking/utls"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/fingerprint"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
@@ -86,7 +87,20 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 	}
 
 	tlsConfig := &tls.Config{ServerName: host}
-	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
+	// When a Claude ClientHello has been captured, reproduce it verbatim on the
+	// official api.anthropic.com HTTP/2 path (ALPN forced to h2). Otherwise keep
+	// the Chrome preset. Each connection gets a fresh spec because ApplyPreset
+	// mutates it.
+	var tlsConn *tls.UConn
+	if spec := fingerprint.ClaudeSpecH2(); spec != nil {
+		tlsConn = tls.UClient(conn, tlsConfig, tls.HelloCustom)
+		if err := tlsConn.ApplyPreset(spec); err != nil {
+			conn.Close()
+			return nil, err
+		}
+	} else {
+		tlsConn = tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
+	}
 
 	if err := tlsConn.Handshake(); err != nil {
 		conn.Close()

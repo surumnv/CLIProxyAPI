@@ -46,6 +46,33 @@ func SChannelTLSFromContext(ctx context.Context) bool {
 	return ok && enabled
 }
 
+type claudeFingerprintContextKey struct{}
+
+// WithClaudeFingerprint marks the current outbound request so the
+// ordered-HTTP/1.1 TLS handshake reproduces the captured Claude Code
+// ClientHello (JA3) via utls, instead of Go's default crypto/tls. It is set for
+// Claude-originated upstream traffic (the Claude executor) when a fingerprint is
+// configured. The official api.anthropic.com HTTP/2 path is gated by host and
+// does not need this marker; this marker covers the third-party relay hosts
+// reached over the shared ordered-h1 transport, where the host alone is not a
+// reliable signal that the request is Claude-bound. Mirrors WithSChannelTLS.
+func WithClaudeFingerprint(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, claudeFingerprintContextKey{}, true)
+}
+
+// ClaudeFingerprintFromContext reports whether the current request opted into
+// the captured Claude ClientHello via WithClaudeFingerprint.
+func ClaudeFingerprintFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	enabled, ok := ctx.Value(claudeFingerprintContextKey{}).(bool)
+	return ok && enabled
+}
+
 type lowercaseHeadersContextKey struct{}
 
 // WithLowercaseHeaders marks the current outbound request so the ordered-HTTP/1.1

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/fingerprint"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
@@ -27,6 +28,22 @@ func maybeMarkSChannelTLS(ctx context.Context, cfg *config.Config, opts cliproxy
 		return ctx
 	}
 	return cliproxyexecutor.WithSChannelTLS(ctx)
+}
+
+// maybeMarkClaudeFingerprint opts the outbound request context into the captured
+// Claude Code ClientHello (JA3) for the ordered-HTTP/1.1 (third-party relay)
+// path, when a fingerprint has been configured via the management API. The
+// official api.anthropic.com HTTP/2 path is gated by host inside the utls
+// transport and does not need this marker.
+//
+// It is called from the Claude executor, so every request it marks is
+// Claude-bound. When no fingerprint is configured the marker is harmless: the
+// handshake helper falls back to the default TLS path.
+func maybeMarkClaudeFingerprint(ctx context.Context) context.Context {
+	if !fingerprint.HasClaudeSpec() {
+		return ctx
+	}
+	return cliproxyexecutor.WithClaudeFingerprint(ctx)
 }
 
 // maybeMarkLowercaseHeaders opts the outbound request into lowercase header

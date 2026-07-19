@@ -27,6 +27,9 @@ func handshakeOrderedH1TLS(ctx context.Context, conn net.Conn, serverName string
 		// reproduces the Codex CLI JA3 6a5d235ee78c6aede6a61448b4e9ff1e.
 		return schannel.Client(conn, schannel.Config{ServerName: serverName})
 	}
+	if c, err, ok := handshakeClaudeH1TLS(ctx, conn, serverName); ok {
+		return c, err
+	}
 	tlsConn := tls.Client(conn, &tls.Config{ServerName: serverName})
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		return nil, err
