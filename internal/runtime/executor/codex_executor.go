@@ -817,6 +817,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return e.executeOpenAIImage(ctx, auth, req, opts)
 	}
 	ctx = maybeMarkSChannelTLS(ctx, e.cfg, opts)
+	ctx = maybeMarkLowercaseHeaders(ctx, opts)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := codexCreds(auth)
@@ -1005,6 +1006,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	ctx = maybeMarkSChannelTLS(ctx, e.cfg, opts)
+	ctx = maybeMarkLowercaseHeaders(ctx, opts)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := codexCreds(auth)
@@ -1111,6 +1113,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return e.executeOpenAIImageStream(ctx, auth, req, opts)
 	}
 	ctx = maybeMarkSChannelTLS(ctx, e.cfg, opts)
+	ctx = maybeMarkLowercaseHeaders(ctx, opts)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := codexCreds(auth)
@@ -1728,7 +1731,10 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 	} else {
 		r.Header.Set("Accept", "application/json")
 	}
-	r.Header.Set("Connection", "Keep-Alive")
+	// Real Codex (reqwest/hyper) does not emit an explicit Connection header on
+	// HTTP/1.1; persistent connections are implicit. Emitting one leaks a CPA
+	// fingerprint (extra header + Title-Case name), so do not set it here.
+	// (Claude's real client does send Connection, so claude_executor keeps it.)
 
 	isAPIKey := false
 	if auth != nil && auth.Attributes != nil {

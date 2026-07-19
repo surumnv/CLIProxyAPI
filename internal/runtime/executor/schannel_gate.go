@@ -28,3 +28,19 @@ func maybeMarkSChannelTLS(ctx context.Context, cfg *config.Config, opts cliproxy
 	}
 	return cliproxyexecutor.WithSChannelTLS(ctx)
 }
+
+// maybeMarkLowercaseHeaders opts the outbound request into lowercase header
+// names in the ordered-HTTP/1.1 writer when the inbound request originated from
+// a Codex client (opts.SourceFormat == "codex"). Real Codex (reqwest/hyper)
+// emits lowercase header names on the wire, so CPA-generated headers must match.
+//
+// This is intentionally Codex-only: Claude (undici) sends mixed-case header
+// names on the wire, and lowercasing them would create a fingerprint mismatch.
+// Unlike maybeMarkSChannelTLS there is no config toggle — lowercasing is always
+// the correct wire image for Codex.
+func maybeMarkLowercaseHeaders(ctx context.Context, opts cliproxyexecutor.Options) context.Context {
+	if !strings.EqualFold(strings.TrimSpace(opts.SourceFormat.String()), codexSourceFormat) {
+		return ctx
+	}
+	return cliproxyexecutor.WithLowercaseHeaders(ctx)
+}

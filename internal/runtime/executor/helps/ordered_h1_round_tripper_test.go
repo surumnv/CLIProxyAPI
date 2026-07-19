@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 func TestBuildOrderedH1RequestUsesOriginalPositionsWithFinalValues(t *testing.T) {
@@ -60,6 +61,100 @@ func TestBuildOrderedH1RequestUsesOriginalPositionsWithFinalValues(t *testing.T)
 		if gotLines[i] != want[i] {
 			t.Fatalf("line[%d] = %q, want %q\nfull:\n%s", i, gotLines[i], want[i], head)
 		}
+	}
+}
+
+// TestBuildOrderedH1RequestPreservesMixedCaseByDefault covers the Claude
+// (undici) path: without the lowercase flag, every emitted header name keeps
+// its original mixed casing (Title-Case app/SDK names, lowercase anthropic-*),
+// matching the genuine undici wire image.
+func TestBuildOrderedH1RequestPreservesMixedCaseByDefault(t *testing.T) {
+	t.Parallel()
+
+	req, err := http.NewRequest(http.MethodPost, "https://api.anthropic.example/v1/messages?beta=true", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer final-token")
+	req.Header.Set("X-Stainless-Arch", "x64")
+	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("Connection", "keep-alive")
+
+	lines := []util.OriginalHeaderLine{
+		{LowerName: "authorization", RawName: "Authorization"},
+		{LowerName: "user-agent", RawName: "User-Agent"},
+		{LowerName: "x-stainless-arch", RawName: "X-Stainless-Arch"},
+		{LowerName: "anthropic-version", RawName: "anthropic-version"},
+		{LowerName: "x-app", RawName: "x-app"},
+		{LowerName: "connection", RawName: "Connection"},
+		{LowerName: "host", RawName: "Host"},
+		{LowerName: "content-length", RawName: "Content-Length"},
+	}
+	req.Header.Set("User-Agent", "claude-cli/1.0")
+	req.Header.Set("x-app", "cli")
+
+	raw, err := buildOrderedH1Request(req, []byte(`{"ok":true}`), lines)
+	if err != nil {
+		t.Fatalf("buildOrderedH1Request: %v", err)
+	}
+	head := string(raw[:strings.Index(string(raw), "\r\n\r\n")])
+	// Names must be preserved verbatim (mixed case), and Connection kept.
+	for _, want := range []string{
+		"Authorization: Bearer final-token",
+		"User-Agent: claude-cli/1.0",
+		"X-Stainless-Arch: x64",
+		"anthropic-version: 2023-06-01",
+		"x-app: cli",
+		"Connection: keep-alive",
+	} {
+		if !strings.Contains(head, want) {
+			t.Fatalf("mixed-case head missing %q\nfull:\n%s", want, head)
+		}
+	}
+}
+
+// TestBuildOrderedH1RequestLowercasesNamesForCodex covers the Codex path: with
+// the lowercase flag set (via WithLowercaseHeaders), every emitted header name
+// is lowercased — replayed inbound names, Host, and Content-Length — matching
+// the real reqwest/hyper wire image. Values are left untouched.
+func TestBuildOrderedH1RequestLowercasesNamesForCodex(t *testing.T) {
+	t.Parallel()
+
+	req, err := http.NewRequest(http.MethodPost, "https://upstream.example/v1/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req = req.WithContext(cliproxyexecutor.WithLowercaseHeaders(req.Context()))
+	req.Header.Set("Authorization", "Bearer final-token")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", "identity") // CPA-generated fallback header
+
+	lines := []util.OriginalHeaderLine{
+		{LowerName: "authorization", RawName: "Authorization"},
+		{LowerName: "content-type", RawName: "Content-Type"},
+		{LowerName: "host", RawName: "Host"},
+		{LowerName: "content-length", RawName: "Content-Length"},
+	}
+
+	raw, err := buildOrderedH1Request(req, []byte(`{"ok":true}`), lines)
+	if err != nil {
+		t.Fatalf("buildOrderedH1Request: %v", err)
+	}
+	head := string(raw[:strings.Index(string(raw), "\r\n\r\n")])
+	gotLines := strings.Split(head, "\r\n")
+	for _, line := range gotLines[1:] { // skip request line
+		name := line[:strings.IndexByte(line, ':')]
+		if name != strings.ToLower(name) {
+			t.Fatalf("header name %q is not lowercase\nfull:\n%s", name, head)
+		}
+	}
+	// Value casing must be untouched.
+	if !strings.Contains(head, "authorization: Bearer final-token") {
+		t.Fatalf("lowercased head missing lowercase authorization with intact value\nfull:\n%s", head)
+	}
+	// The CPA-generated fallback header (not in lines) must also be lowercased.
+	if !strings.Contains(head, "accept-encoding: identity") {
+		t.Fatalf("fallback header not lowercased\nfull:\n%s", head)
 	}
 }
 

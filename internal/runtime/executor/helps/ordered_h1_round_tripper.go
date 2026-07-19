@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http/httpguts"
@@ -468,6 +469,19 @@ func buildOrderedH1RequestHead(req *http.Request, contentLength int64, lines []u
 	var raw bytes.Buffer
 	raw.Grow(4096)
 
+	// lowercaseNames is set for Codex-originated requests: real Codex
+	// (reqwest/hyper) emits lowercase header names on the wire, so every name
+	// we write — replayed inbound names, CPA-generated fallback names, and
+	// Host/Content-Length — is lowercased to match. Claude and other sources
+	// leave this unset and keep their original (mixed) casing via RawName.
+	lowercaseNames := cliproxyexecutor.LowercaseHeadersFromContext(req.Context())
+	emitName := func(name string) string {
+		if lowercaseNames {
+			return strings.ToLower(name)
+		}
+		return name
+	}
+
 	target := req.URL.RequestURI()
 	if target == "" {
 		target = "/"
@@ -498,7 +512,7 @@ func buildOrderedH1RequestHead(req *http.Request, contentLength int64, lines []u
 			if host == "" {
 				continue
 			}
-			if err := writeHeaderLine(&raw, rawName, host); err != nil {
+			if err := writeHeaderLine(&raw, emitName(rawName), host); err != nil {
 				return nil, err
 			}
 			emittedHost = true
@@ -510,7 +524,7 @@ func buildOrderedH1RequestHead(req *http.Request, contentLength int64, lines []u
 			if contentLength < 0 {
 				continue
 			}
-			if err := writeHeaderLine(&raw, rawName, fmt.Sprintf("%d", contentLength)); err != nil {
+			if err := writeHeaderLine(&raw, emitName(rawName), fmt.Sprintf("%d", contentLength)); err != nil {
 				return nil, err
 			}
 			emittedContentLength = true
@@ -523,7 +537,7 @@ func buildOrderedH1RequestHead(req *http.Request, contentLength int64, lines []u
 			if cursor >= len(values) {
 				continue
 			}
-			if err := writeHeaderLine(&raw, rawName, values[cursor]); err != nil {
+			if err := writeHeaderLine(&raw, emitName(rawName), values[cursor]); err != nil {
 				return nil, err
 			}
 			emittedCounts[lowerName] = cursor + 1
@@ -533,7 +547,7 @@ func buildOrderedH1RequestHead(req *http.Request, contentLength int64, lines []u
 	if !emittedHost {
 		host := outboundHost(req)
 		if host != "" {
-			if err := writeHeaderLine(&raw, "Host", host); err != nil {
+			if err := writeHeaderLine(&raw, emitName("Host"), host); err != nil {
 				return nil, err
 			}
 		}
@@ -548,14 +562,14 @@ func buildOrderedH1RequestHead(req *http.Request, contentLength int64, lines []u
 		values := req.Header[key]
 		cursor := emittedCounts[lowerName]
 		for _, value := range values[cursor:] {
-			if err := writeHeaderLine(&raw, key, value); err != nil {
+			if err := writeHeaderLine(&raw, emitName(key), value); err != nil {
 				return nil, err
 			}
 		}
 	}
 
 	if !emittedContentLength && contentLength > 0 {
-		if err := writeHeaderLine(&raw, "Content-Length", fmt.Sprintf("%d", contentLength)); err != nil {
+		if err := writeHeaderLine(&raw, emitName("Content-Length"), fmt.Sprintf("%d", contentLength)); err != nil {
 			return nil, err
 		}
 	}

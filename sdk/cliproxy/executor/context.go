@@ -45,3 +45,33 @@ func SChannelTLSFromContext(ctx context.Context) bool {
 	enabled, ok := ctx.Value(schannelTLSContextKey{}).(bool)
 	return ok && enabled
 }
+
+type lowercaseHeadersContextKey struct{}
+
+// WithLowercaseHeaders marks the current outbound request so the ordered-HTTP/1.1
+// writer lowercases every emitted header name. The real Codex client
+// (reqwest/hyper) stores header names in http::HeaderMap lowercase and writes
+// them to the wire verbatim, so any header CPA generates itself (e.g. via the
+// fallback branch, or Host/Content-Length) must also be lowercased to match.
+//
+// It is only set for Codex-originated requests. It must NOT be set for Claude
+// (undici) traffic: real Claude header names are mixed-case (X-Stainless-*,
+// User-Agent Title-Case; anthropic-*, x-app lowercase), so lowercasing them
+// would diverge from the genuine client. See WithSChannelTLS for the sibling
+// per-source gating pattern.
+func WithLowercaseHeaders(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, lowercaseHeadersContextKey{}, true)
+}
+
+// LowercaseHeadersFromContext reports whether the current request opted into
+// lowercase outbound header names via WithLowercaseHeaders.
+func LowercaseHeadersFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	enabled, ok := ctx.Value(lowercaseHeadersContextKey{}).(bool)
+	return ok && enabled
+}
