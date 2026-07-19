@@ -890,7 +890,7 @@ func disableThinkingIfToolChoiceForced(body []byte) []byte {
 
 // normalizeClaudeSamplingForUpstream keeps Anthropic message requests valid.
 func normalizeClaudeSamplingForUpstream(body []byte) []byte {
-	body, _ = sjson.DeleteBytes(body, "temperature")
+	// body, _ = sjson.DeleteBytes(body, "temperature")
 
 	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
 	switch thinkingType {
