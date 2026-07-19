@@ -65,3 +65,46 @@ func TestMaybeMarkSChannelTLS(t *testing.T) {
 		})
 	}
 }
+
+func TestMaybeMarkLowercaseHeaders(t *testing.T) {
+	t.Parallel()
+
+	opts := func(source string) cliproxyexecutor.Options {
+		return cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString(source)}
+	}
+
+	cases := []struct {
+		name    string
+		opts    cliproxyexecutor.Options
+		wantSet bool
+	}{
+		{
+			name:    "codex source is marked (no config toggle required)",
+			opts:    opts("codex"),
+			wantSet: true,
+		},
+		{
+			// Critical: Claude wire header names are mixed-case; lowercasing
+			// them would create a fingerprint mismatch, so it must stay unset.
+			name:    "claude source is never marked",
+			opts:    opts("claude"),
+			wantSet: false,
+		},
+		{
+			name:    "openai source is not marked",
+			opts:    opts("openai"),
+			wantSet: false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := maybeMarkLowercaseHeaders(context.Background(), tc.opts)
+			if got := cliproxyexecutor.LowercaseHeadersFromContext(ctx); got != tc.wantSet {
+				t.Fatalf("LowercaseHeadersFromContext = %v, want %v", got, tc.wantSet)
+			}
+		})
+	}
+}
