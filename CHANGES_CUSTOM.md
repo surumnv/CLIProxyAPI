@@ -1100,3 +1100,98 @@ Windows + Linux 均编译通过，`go vet` 干净，全部单测绿。
 > 升级后用 `grep 'NewProxyAwareHTTPClient' openai_compat_executor.go` 复核是否被官方改回。
 > B 依赖 `handshakeOrderedH1TLS` 从 `req.Context()` 读标记，与主题六的「握手已改为 handshakeOrderedH1TLS」联动，
 > 若官方重写握手需一并接回 ctx 读取。
+
+---
+
+## 追加改动：可选的 Claude JA3 自动刷新（后端）
+
+### 背景
+
+管理面板 AI 供应商页需要在打开 Claude 供应商时，检测本机内置 Claude Desktop CLI
+（`%LOCALAPPDATA%\Claude-3p\claude-code\<版本>\claude.exe`）的版本号，并在版本升级时
+自动重采集 JA3 指纹。为此后端补两件事：一个只读的版本探测端点，一个总开关。
+
+### 修改文件
+
+- `internal/fingerprint/capture.go`（新增导出函数 `DetectClaudeVersion`）
+- `internal/api/handlers/management/claude_ja3.go`（新增 `GetClaudeCLIVersion` handler）
+- `internal/api/server.go`（注册 `GET /v0/management/claude-ja3/cli-version`）
+- `internal/config/config.go`（新增顶层布尔 `claude-ja3-auto-refresh`，默认 false）
+
+### 实现
+
+1. `DetectClaudeVersion()` 复用既有 `defaultClaudePath()`，只读安装布局、**不启动进程**，
+   返回最新版本目录名；非 Windows 返回 unsupported 错误（与自动探测采集一致）。
+2. `GetClaudeCLIVersion` 端点始终返回 200：探测成功 `{"detected":true,"version":"x.y.z"}`，
+   失败 `{"detected":false,"error":"..."}`（前端据此静默跳过）。
+3. 新增顶层布尔 `claude-ja3-auto-refresh`（`yaml:"claude-ja3-auto-refresh"`），默认 false。
+   前端据此决定是否显示「刷新 JA3」按钮与是否自动刷新；关闭时前端不渲染任何相关 UI，
+   也不发探测请求。该字段随 `/config` 原样透传（顶层布尔与 `schannel-tls` 同族）。
+
+### 验证
+
+```bash
+cd /d/AIProject/CLIProxyAPI
+GOOS=windows go build ./...   # ok
+GOOS=linux   go build ./...   # ok
+go vet ./internal/...         # clean
+```
+
+---
+
+## 追加改动：Claude JA3 采集在服务进程下挂起的修复（capture.go 加固）
+
+### 背景
+
+管理面板点「刷新 JA3」后，后端 `POST /v0/management/claude-ja3/capture` 会启动本机
+`claude.exe`、抓取其 ClientHello 后立即断开。实际部署时反馈：采集**必现超时**（服务日志
+`502 | 1m0s`），而在开发者终端里手动跑同样的采集却每次秒成功。
+
+### 根因
+
+内置的 Claude Desktop CLI 装在 `%LOCALAPPDATA%\Claude-3p\claude-code\<版本>\claude.exe`，
+它是**第三方（3p）构建**，设计上作为 Claude Desktop 的子进程运行——Claude Desktop 启动它时
+**总会传 `CLAUDE_CODE_ENTRYPOINT=claude-desktop-3p`**。缺这个环境变量时，该构建会在启动阶段
+**静默挂起**：既不打印 stderr，也不向外拨号，直到超时被杀。
+
+采集代码用 `append(os.Environ(), ...)` 继承父进程环境。开发者在终端里跑过一次 `claude`，
+shell 便继承了这个变量，于是子进程也拿得到、采集成功；而 CPA 作为独立服务启动时环境里
+**没有**这个变量（实测该变量既未写入 HKCU\Environment 也未写入系统环境，只存在于
+交互式会话的进程内存），子进程拿不到，必现挂起。定位方法：对完整环境做二分/逐删，
+`CLAUDE_CODE_ENTRYPOINT=claude-desktop-3p` 单独一项即可让采集从「挂起 6/6」变为「成功 5/5」，
+确定性复现。
+
+### 修改文件
+
+- `internal/fingerprint/capture.go`
+
+### 实现
+
+1. **根因修复**：`proc.Env` 显式注入 `CLAUDE_CODE_ENTRYPOINT=claude-desktop-3p`，使采集
+   不再依赖服务进程恰好继承到该变量。同时补 `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1`、
+   `CI=1`、`IS_DEMO=1`，并给 stdin 喂 EOF（`strings.NewReader("")`），压掉首次运行/标题等
+   交互路径。
+2. **受控工作目录**：`CaptureOptions` 新增 `WorkDir` 字段；为空时创建一个受控空临时目录并
+   把 `proc.Dir` 指向它，采集后带重试删除（`removeWithRetry`，容忍 Windows 下刚被杀的子进程
+   仍短暂占用 cwd 句柄）。这样采集不再继承服务器 cwd，也不会因该目录未受信而卡「trust this
+   folder?」。
+3. **预置信任/审批**：原 `approveAPIKey` 扩展为 `prepareClaudeJSON(key, workDir)`，在**同一次**
+   读写 `~/.claude.json` 里既预批 dummy key，又把 workDir 标记为已信任/已引导
+   （`hasTrustDialogAccepted` 等，合并而非覆盖已有条目），配对的 restore 采集后逐字节还原。
+4. **诊断日志与错误分类**：保留 stderr 并跟踪子进程是否曾拨号（`dialed`）、是否已退出
+   （非阻塞查 `exitCh`）。超时/早退时按 logrus `Warn` 输出 `pid/elapsed/connected/exited/stderr`，
+   并把返回错误区分为三类可行动的原因：已连接但无可读 ClientHello（读/TLS 问题）、从未连接且
+   仍在运行（卡交互提示/冷启动）、从未连接且已退出（静默死亡，附 stderr）。
+
+### 验证
+
+```bash
+cd /d/AIProject/CLIProxyAPI
+GOOS=windows go build ./...   # ok
+GOOS=linux   go build ./...   # ok
+go vet ./internal/...         # clean
+```
+
+在**剥离全部 `CLAUDE_CODE_*` 的干净环境**下运行真实采集（模拟服务进程），现可稳定拿到
+JA3（`e97f5146a7009cc2918b50e903b6ff8d`），exit=0；`~/.claude.json` 采集后逐字节还原、
+无残留临时目录。

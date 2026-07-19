@@ -138,6 +138,16 @@ type Config struct {
 	// on other platforms. Defaults to false (Go crypto/tls).
 	SChannelTLS bool `yaml:"schannel-tls" json:"schannel-tls"`
 
+	// ClaudeJA3AutoRefresh, when true, enables the management panel's Claude JA3
+	// auto-refresh feature: the AI-providers page exposes a manual "refresh JA3"
+	// button next to the Claude title and, on each visit, detects the locally
+	// installed Claude Code CLI version. When that version changes from the
+	// previously seen value, the panel re-captures the JA3 fingerprint
+	// automatically. Off by default; when off the button is hidden and no
+	// auto-refresh happens. This is a panel-facing toggle only — the outbound
+	// fingerprint itself is unaffected.
+	ClaudeJA3AutoRefresh bool `yaml:"claude-ja3-auto-refresh" json:"claude-ja3-auto-refresh"`
+
 	// CodexHeaderDefaults configures fallback headers for Codex OAuth model requests.
 	// These are used only when the client does not send its own headers.
 	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`

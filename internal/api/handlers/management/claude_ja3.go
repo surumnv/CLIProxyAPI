@@ -110,6 +110,21 @@ func (h *Handler) DeleteClaudeJA3(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"configured": false})
 }
 
+// GetClaudeCLIVersion reports the version-dir name of the newest locally
+// installed Claude Code CLI (auto-detected; Windows only). The frontend uses
+// this to detect bundled-CLI upgrades and refresh the JA3 fingerprint. It only
+// inspects the install layout and never launches the executable.
+//
+//	GET /v0/management/claude-ja3/cli-version
+func (h *Handler) GetClaudeCLIVersion(c *gin.Context) {
+	version, err := fingerprint.DetectClaudeVersion()
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"detected": false, "error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"detected": true, "version": version})
+}
+
 // captureClaudeJA3Request is the optional body for POST (live capture).
 type captureClaudeJA3Request struct {
 	ClaudePath string `json:"claude_path,omitempty"`
