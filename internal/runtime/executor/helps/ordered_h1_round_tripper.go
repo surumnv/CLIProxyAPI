@@ -96,6 +96,18 @@ func sharedOrderedH1RoundTripper(proxyURL string, fallback http.RoundTripper) ht
 	return actual.(http.RoundTripper)
 }
 
+// SharedOrderedH1RoundTripper exposes the process-wide ordered-HTTP/1.1 round
+// tripper for callers outside this package that resolve their own proxy URL and
+// fallback transport (e.g. the management api-call path, which has a three-tier
+// proxy precedence not covered by NewOrderedH1ProxyClient). The returned round
+// tripper honours the same per-request context flags as every other ordered-h1
+// user: util.WithOriginalHeaderOrder (required — without a captured/synthetic
+// order it transparently delegates to fallback), executor.WithLowercaseHeaders,
+// and executor.WithSChannelTLS. Instances are cached per proxy URL.
+func SharedOrderedH1RoundTripper(proxyURL string, fallback http.RoundTripper) http.RoundTripper {
+	return sharedOrderedH1RoundTripper(proxyURL, fallback)
+}
+
 func (t *orderedH1RoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	if t == nil {
 		return http.DefaultTransport.RoundTrip(req)

@@ -13,7 +13,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
@@ -40,6 +43,132 @@ func defaultAPICallUserAgent(originator string) string {
 		return misc.LocalCodexUserAgent()
 	}
 	return misc.LocalCodexCLIUserAgent()
+}
+
+// codexCLIOriginator is the default Originator a real Codex CLI advertises
+// (DEFAULT_ORIGINATOR in codex-rs login/src/auth/default_client.rs).
+const codexCLIOriginator = "codex_cli_rs"
+
+// codexModelsHeaderOrder is the exact on-the-wire header order (lowercase names)
+// a real Codex CLI (reqwest → hyper) emits for GET /v1/models, verified against
+// a codex_cli_rs 0.145.0 capture:
+//
+//	accept: */*
+//	originator: codex_cli_rs
+//	user-agent: codex_cli_rs/<ver> (<os>) <terminal>
+//	host: <host>
+//
+// `accept: */*` is injected automatically by reqwest (not by codex code);
+// `originator` and `user-agent` come from the client's default headers;
+// `authorization` is appended by the bearer auth layer when a token is attached
+// (absent on the unauthenticated reachability probe); `host` is written last by
+// hyper. There is no content-type (GET has no body) and no accept-encoding
+// (codex's reqwest build enables no decompression feature). Listing a header
+// here that is absent from the request is harmless — the ordered-h1 writer skips
+// any name it cannot resolve in req.Header.
+var codexModelsHeaderOrder = []string{"accept", "originator", "user-agent", "authorization", "host"}
+
+// isCodexModelsFetch reports whether an api-call request is the Codex /
+// OpenAI-compatible model-list fetch (a GET whose path ends in /models), as
+// opposed to a Claude, Gemini or Grok discovery call. Those other brands carry a
+// brand-specific auth/version header (Anthropic-Version, X-Api-Key,
+// X-Goog-Api-Key, X-Xai-Token-Auth), so their presence rules the request out.
+func isCodexModelsFetch(method string, parsedURL *url.URL, headers http.Header) bool {
+	if !strings.EqualFold(method, http.MethodGet) || parsedURL == nil {
+		return false
+	}
+	path := strings.ToLower(strings.TrimRight(parsedURL.Path, "/"))
+	if !strings.HasSuffix(path, "/models") {
+		return false
+	}
+	for _, name := range []string{"Anthropic-Version", "X-Api-Key", "X-Goog-Api-Key", "X-Xai-Token-Auth"} {
+		if strings.TrimSpace(headers.Get(name)) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// applyCodexModelsHeaders rewrites req into the exact header shape a real Codex
+// CLI sends for GET /v1/models: only accept / originator / user-agent /
+// authorization / host, dropping every CPA- or Go-injected extra (content-type,
+// accept-encoding, and any custom provider headers). Existing originator and
+// user-agent values are preserved when the caller supplied them; otherwise the
+// Codex CLI defaults are used. Emitting the lowercase names in the fixed
+// codexModelsHeaderOrder is handled by the ordered-h1 writer.
+func applyCodexModelsHeaders(req *http.Request) {
+	authorization := strings.TrimSpace(req.Header.Get("Authorization"))
+	originator := strings.TrimSpace(req.Header.Get("Originator"))
+	if originator == "" {
+		originator = codexCLIOriginator
+	}
+	userAgent := strings.TrimSpace(req.Header.Get("User-Agent"))
+	if userAgent == "" {
+		userAgent = misc.LocalCodexCLIUserAgent()
+	}
+
+	req.Header = make(http.Header, 4)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Originator", originator)
+	req.Header.Set("User-Agent", userAgent)
+	if authorization != "" {
+		req.Header.Set("Authorization", authorization)
+	}
+}
+
+// codexModelsWireOrder builds the synthetic inbound-header order consumed by the
+// ordered-HTTP/1.1 writer so it emits the Codex header set in codex order with
+// lowercase names.
+func codexModelsWireOrder() []util.OriginalHeaderLine {
+	lines := make([]util.OriginalHeaderLine, 0, len(codexModelsHeaderOrder))
+	for _, name := range codexModelsHeaderOrder {
+		lines = append(lines, util.OriginalHeaderLine{LowerName: name, RawName: name})
+	}
+	return lines
+}
+
+// buildOrderedH1Fallback returns the transport the ordered-HTTP/1.1 round
+// tripper delegates to when a request cannot use ordered-h1 (never the case on
+// the Codex models path, which always supplies a header order, but required for
+// safety). It mirrors NewOrderedH1ProxyClient: a proxy transport when a proxy is
+// configured, otherwise the shared default transport.
+func buildOrderedH1Fallback(proxyURL string) http.RoundTripper {
+	if strings.TrimSpace(proxyURL) != "" {
+		if transport := buildProxyTransport(proxyURL); transport != nil {
+			return transport
+		}
+	}
+	return http.DefaultTransport
+}
+
+// resolveAPICallProxyURL returns the proxy URL that apiCallTransport would
+// select for this credential, following the same precedence (credential
+// proxy_url → per-API-key config proxy → global proxy-url) and the same
+// build-validation. It is used to key/dial the ordered-HTTP/1.1 transport on the
+// Codex models path; an empty result means direct connection.
+func (h *Handler) resolveAPICallProxyURL(auth *coreauth.Auth) string {
+	var candidates []string
+	if auth != nil {
+		if proxyStr := strings.TrimSpace(auth.ProxyURL); proxyStr != "" {
+			candidates = append(candidates, proxyStr)
+		}
+		if h != nil && h.cfg != nil {
+			if proxyStr := strings.TrimSpace(proxyURLFromAPIKeyConfig(h.cfg, auth)); proxyStr != "" {
+				candidates = append(candidates, proxyStr)
+			}
+		}
+	}
+	if h != nil && h.cfg != nil {
+		if proxyStr := strings.TrimSpace(h.cfg.ProxyURL); proxyStr != "" {
+			candidates = append(candidates, proxyStr)
+		}
+	}
+	for _, proxyStr := range candidates {
+		if buildProxyTransport(proxyStr) != nil {
+			return proxyStr
+		}
+	}
+	return ""
 }
 
 const (
@@ -216,7 +345,31 @@ func (h *Handler) APICall(c *gin.Context) {
 	httpClient := &http.Client{
 		Timeout: defaultAPICallTimeout,
 	}
-	httpClient.Transport = h.apiCallTransport(auth)
+
+	// The Codex / OpenAI-compatible model-list fetch (GET .../models) is the one
+	// api-call type that must be indistinguishable from a real Codex CLI on the
+	// wire: strip it down to exactly the headers Codex sends, in Codex order with
+	// lowercase names, and route it through the ordered-HTTP/1.1 transport (which
+	// also carries the SChannel JA3/JA4 fingerprint when schannel-tls is on).
+	// Every other api-call keeps the standard net/http transport unchanged.
+	if isCodexModelsFetch(method, parsedURL, req.Header) {
+		applyCodexModelsHeaders(req)
+
+		ctx := req.Context()
+		order := &util.OriginalHeaderOrder{}
+		order.Set(codexModelsWireOrder())
+		ctx = util.WithOriginalHeaderOrder(ctx, order)
+		ctx = cliproxyexecutor.WithLowercaseHeaders(ctx)
+		if h != nil && h.cfg != nil && h.cfg.SChannelTLS {
+			ctx = cliproxyexecutor.WithSChannelTLS(ctx)
+		}
+		req = req.WithContext(ctx)
+
+		proxyURL := h.resolveAPICallProxyURL(auth)
+		httpClient.Transport = helps.SharedOrderedH1RoundTripper(proxyURL, buildOrderedH1Fallback(proxyURL))
+	} else {
+		httpClient.Transport = h.apiCallTransport(auth)
+	}
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
