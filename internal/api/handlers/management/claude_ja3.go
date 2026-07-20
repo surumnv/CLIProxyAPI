@@ -146,7 +146,14 @@ func (h *Handler) CaptureClaudeJA3(c *gin.Context) {
 			return
 		}
 	}
-	timeout := time.Duration(req.TimeoutSec) * time.Second
+	timeoutSec := req.TimeoutSec
+	if timeoutSec < 0 {
+		timeoutSec = 0
+	}
+	if timeoutSec > 120 {
+		timeoutSec = 120
+	}
+	timeout := time.Duration(timeoutSec) * time.Second
 	res, err := fingerprint.Capture(fingerprint.CaptureOptions{
 		ClaudePath:    strings.TrimSpace(req.ClaudePath),
 		Prompt:        req.Prompt,

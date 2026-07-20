@@ -73,10 +73,10 @@ func secStatus(code uintptr) string {
 
 // Conn is a net.Conn whose TLS layer is provided by Windows SChannel.
 type Conn struct {
-	raw    net.Conn
-	cfg    Config
-	cred   secHandle
-	ctx    secHandle
+	raw     net.Conn
+	cfg     Config
+	cred    secHandle
+	ctx     secHandle
 	haveCtx bool
 
 	sizes secPkgContextStreamSizes
@@ -88,8 +88,8 @@ type Conn struct {
 
 	hsDone bool
 
-	mu       sync.Mutex // serializes writes (EncryptMessage)
-	readMu   sync.Mutex // serializes reads (DecryptMessage)
+	mu     sync.Mutex // serializes writes (EncryptMessage)
+	readMu sync.Mutex // serializes reads (DecryptMessage)
 }
 
 // Client performs a TLS client handshake over raw using SChannel and returns a
@@ -111,7 +111,13 @@ func Client(raw net.Conn, cfg Config) (*Conn, error) {
 }
 
 func (c *Conn) acquireCredentials() error {
-	flags := uint32(schCredNoDefaultCreds | schCredManualCredValidation)
+	// SCH_CRED_NO_DEFAULT_CREDS only disables default *client* certificates.
+	// Server-certificate validation stays enabled unless InsecureSkipVerify
+	// opts into SCH_CRED_MANUAL_CRED_VALIDATION (and the matching ISC flag).
+	flags := uint32(schCredNoDefaultCreds)
+	if c.cfg.InsecureSkipVerify {
+		flags |= schCredManualCredValidation
+	}
 	flags |= c.cfg.ExtraCredFlags
 
 	cred := schannelCred{
@@ -150,8 +156,13 @@ func (c *Conn) freeCredentials() {
 	}
 }
 
-const initContextReq = iscReqConfidentiality | iscReqAllocateMemory |
-	iscReqStream | iscReqExtendedError | iscReqManualCredValidation
+func (c *Conn) contextReq() uint32 {
+	req := uint32(iscReqConfidentiality | iscReqAllocateMemory | iscReqStream | iscReqExtendedError)
+	if c.cfg.InsecureSkipVerify {
+		req |= iscReqManualCredValidation
+	}
+	return req
+}
 
 func (c *Conn) handshake() error {
 	if c.cfg.HandshakeTimeout > 0 {
@@ -200,9 +211,9 @@ func (c *Conn) handshake() error {
 		uintptr(unsafe.Pointer(&c.cred)),
 		0, // no existing context
 		uintptr(unsafe.Pointer(target)),
-		uintptr(initContextReq),
+		uintptr(c.contextReq()),
 		0,
-		0, // TargetDataRep unused for SChannel
+		0,         // TargetDataRep unused for SChannel
 		inDescPtr, // ALPN input (or 0)
 		0,
 		uintptr(unsafe.Pointer(&ctx)),
@@ -267,7 +278,7 @@ func (c *Conn) handshakeLoop(target *uint16) error {
 			uintptr(unsafe.Pointer(&c.cred)),
 			uintptr(unsafe.Pointer(&c.ctx)),
 			uintptr(unsafe.Pointer(target)),
-			uintptr(initContextReq),
+			uintptr(c.contextReq()),
 			0,
 			0,
 			uintptr(unsafe.Pointer(&inDesc)),

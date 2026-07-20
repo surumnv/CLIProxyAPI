@@ -10,11 +10,24 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
 )
+
+const (
+	// defaultCaptureTimeout is used when CaptureOptions.Timeout is unset/non-positive.
+	defaultCaptureTimeout = 30 * time.Second
+	// maxCaptureTimeout caps a single capture so a management caller cannot hold a
+	// child process / temp-dir / ~/.claude.json mutation open indefinitely.
+	maxCaptureTimeout = 120 * time.Second
+)
+
+// captureMu serializes Capture runs. Concurrent captures would race on
+// ~/.claude.json backup/restore and could leave the file in a wrong state.
+var captureMu sync.Mutex
 
 // dummyAPIKey is passed to claude.exe so it walks the request path even when the
 // user is not logged in. The request itself fails (we drop the connection after
@@ -32,7 +45,7 @@ type CaptureOptions struct {
 	// Prompt is passed to `claude -p` to trigger a request. Defaults to "hi".
 	Prompt string
 	// Timeout bounds the whole capture (waiting for the first connection).
-	// Defaults to 30s.
+	// Defaults to 30s and is hard-capped at 120s.
 	Timeout time.Duration
 	// ApproveAPIKey, when true, pre-approves the dummy key in ~/.claude.json
 	// (with backup/restore) so `claude -p` does not hang on the approval prompt.
@@ -57,13 +70,19 @@ type CaptureResult struct {
 // raw ClientHello it emits. It does not touch the persisted fingerprint; callers
 // pass the result to Store.Set to make it active.
 func Capture(opts CaptureOptions) (*CaptureResult, error) {
+	captureMu.Lock()
+	defer captureMu.Unlock()
+
 	prompt := opts.Prompt
 	if strings.TrimSpace(prompt) == "" {
 		prompt = "hi"
 	}
 	timeout := opts.Timeout
 	if timeout <= 0 {
-		timeout = 30 * time.Second
+		timeout = defaultCaptureTimeout
+	}
+	if timeout > maxCaptureTimeout {
+		timeout = maxCaptureTimeout
 	}
 
 	exe := strings.TrimSpace(opts.ClaudePath)
@@ -528,9 +547,9 @@ func ensureTrustedProject(doc map[string]json.RawMessage, workDir string) (bool,
 	// Desired values that suppress the interactive trust/onboarding prompts.
 	trueRaw := json.RawMessage("true")
 	want := map[string]json.RawMessage{
-		"hasTrustDialogAccepted":                 trueRaw,
-		"hasCompletedProjectOnboarding":          trueRaw,
-		"hasClaudeMdExternalIncludesApproved":    trueRaw,
+		"hasTrustDialogAccepted":                  trueRaw,
+		"hasCompletedProjectOnboarding":           trueRaw,
+		"hasClaudeMdExternalIncludesApproved":     trueRaw,
 		"hasClaudeMdExternalIncludesWarningShown": trueRaw,
 	}
 	changed := false

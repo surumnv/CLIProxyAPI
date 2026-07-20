@@ -135,13 +135,15 @@ type Config struct {
 	EnabledProtocols uint32
 
 	// ExtraCredFlags is OR'd into SCHANNEL_CRED.dwFlags on top of the base
-	// flags (SCH_CRED_NO_DEFAULT_CREDS | SCH_CRED_MANUAL_CRED_VALIDATION). Use
-	// it to experiment with e.g. SCH_USE_STRONG_CRYPTO while matching a
-	// captured Codex ClientHello.
+	// flags (SCH_CRED_NO_DEFAULT_CREDS, and SCH_CRED_MANUAL_CRED_VALIDATION only
+	// when InsecureSkipVerify is true). Use it to experiment with e.g.
+	// SCH_USE_STRONG_CRYPTO while matching a captured Codex ClientHello.
 	ExtraCredFlags uint32
 
-	// InsecureSkipVerify is accepted for API symmetry. Certificate validation
-	// is always manual here (we do not validate) and does not affect JA3.
+	// InsecureSkipVerify, when true, opts out of SChannel server-certificate
+	// validation (SCH_CRED_MANUAL_CRED_VALIDATION + ISC_REQ_MANUAL_CRED_VALIDATION).
+	// The default false keeps system chain validation enabled. Certificate
+	// validation happens after ClientHello, so this flag does not affect JA3.
 	InsecureSkipVerify bool
 
 	// HandshakeTimeout bounds the whole handshake. 0 means no deadline change.
