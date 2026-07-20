@@ -31,15 +31,22 @@ func maybeMarkSChannelTLS(ctx context.Context, cfg *config.Config, opts cliproxy
 }
 
 // maybeMarkClaudeFingerprint opts the outbound request context into the captured
-// Claude Code ClientHello (JA3) for the ordered-HTTP/1.1 (third-party relay)
-// path, when a fingerprint has been configured via the management API. The
-// official api.anthropic.com HTTP/2 path is gated by host inside the utls
-// transport and does not need this marker.
+// Claude Code ClientHello (JA3) when both hold:
+//   - the claude-ja3-auto-refresh config toggle is on, and
+//   - a fingerprint has been configured via the management API.
+//
+// The marker is used by:
+//   - the ordered-HTTP/1.1 (third-party relay) handshake helper, and
+//   - the official api.anthropic.com HTTP/2 utls path, which only applies the
+//     captured ClientHello when this opt-in is present.
 //
 // It is called from the Claude executor, so every request it marks is
-// Claude-bound. When no fingerprint is configured the marker is harmless: the
-// handshake helper falls back to the default TLS path.
-func maybeMarkClaudeFingerprint(ctx context.Context) context.Context {
+// Claude-bound. When the toggle is off or no fingerprint is configured the
+// marker is not set and handshakes fall back to the default TLS path.
+func maybeMarkClaudeFingerprint(ctx context.Context, cfg *config.Config) context.Context {
+	if cfg == nil || !cfg.ClaudeJA3AutoRefresh {
+		return ctx
+	}
 	if !fingerprint.HasClaudeSpec() {
 		return ctx
 	}

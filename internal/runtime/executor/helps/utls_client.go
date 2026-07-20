@@ -12,6 +12,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/fingerprint"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
@@ -19,15 +20,18 @@ import (
 )
 
 // utlsRoundTripper implements http.RoundTripper using utls with Chrome fingerprint
-// to bypass Cloudflare's TLS fingerprinting on Anthropic domains.
+// to bypass Cloudflare's TLS fingerprinting on Anthropic domains. When
+// useClaudeFingerprint is true and a captured Claude ClientHello is available,
+// official Anthropic hosts reproduce that ClientHello instead of Chrome.
 type utlsRoundTripper struct {
-	mu          sync.Mutex
-	connections map[string]*http2.ClientConn
-	pending     map[string]*sync.Cond
-	dialer      proxy.Dialer
+	mu                   sync.Mutex
+	connections          map[string]*http2.ClientConn
+	pending              map[string]*sync.Cond
+	dialer               proxy.Dialer
+	useClaudeFingerprint bool
 }
 
-func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
+func newUtlsRoundTripper(proxyURL string, useClaudeFingerprint bool) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
 	if proxyURL != "" {
 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
@@ -38,9 +42,10 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 		}
 	}
 	return &utlsRoundTripper{
-		connections: make(map[string]*http2.ClientConn),
-		pending:     make(map[string]*sync.Cond),
-		dialer:      dialer,
+		connections:          make(map[string]*http2.ClientConn),
+		pending:              make(map[string]*sync.Cond),
+		dialer:               dialer,
+		useClaudeFingerprint: useClaudeFingerprint,
 	}
 }
 
@@ -87,16 +92,21 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 	}
 
 	tlsConfig := &tls.Config{ServerName: host}
-	// When a Claude ClientHello has been captured, reproduce it verbatim on the
-	// official api.anthropic.com HTTP/2 path (ALPN forced to h2). Otherwise keep
-	// the Chrome preset. Each connection gets a fresh spec because ApplyPreset
+	// When the request opted into Claude fingerprint alignment and a Claude
+	// ClientHello has been captured, reproduce it verbatim on the official
+	// api.anthropic.com HTTP/2 path (ALPN forced to h2). Otherwise keep the
+	// Chrome preset. Each connection gets a fresh spec because ApplyPreset
 	// mutates it.
 	var tlsConn *tls.UConn
-	if spec := fingerprint.ClaudeSpecH2(); spec != nil {
-		tlsConn = tls.UClient(conn, tlsConfig, tls.HelloCustom)
-		if err := tlsConn.ApplyPreset(spec); err != nil {
-			conn.Close()
-			return nil, err
+	if t.useClaudeFingerprint {
+		if spec := fingerprint.ClaudeSpecH2(); spec != nil {
+			tlsConn = tls.UClient(conn, tlsConfig, tls.HelloCustom)
+			if err := tlsConn.ApplyPreset(spec); err != nil {
+				conn.Close()
+				return nil, err
+			}
+		} else {
+			tlsConn = tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
 		}
 	} else {
 		tlsConn = tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
@@ -189,7 +199,10 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		ctxRoundTripper, _ = ctx.Value("cliproxy.roundtripper").(http.RoundTripper)
 	}
 
-	var utlsRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
+	// Claude H2 fingerprint alignment is decided per client from the request
+	// context (executor.WithClaudeFingerprint), set only for Claude-originated
+	// requests when claude-ja3-auto-refresh is on and a capture exists.
+	var utlsRT http.RoundTripper = newUtlsRoundTripper(proxyURL, cliproxyexecutor.ClaudeFingerprintFromContext(ctx))
 	var standardTransport http.RoundTripper = http.DefaultTransport
 	var orderedProxyURL string
 	wrapOrderedTransport := true
