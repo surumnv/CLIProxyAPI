@@ -201,6 +201,7 @@ func (s *Store) SpecWithALPN(protocols ...string) *tls.ClientHelloSpec {
 	if err != nil {
 		return nil
 	}
+	ensureSNIExtension(spec)
 	overrideALPN(spec, protocols)
 	return spec
 }
@@ -236,7 +237,9 @@ func ClaudeSpecH2() *tls.ClientHelloSpec {
 
 // ClaudeSpecH1 returns the active Claude ClientHelloSpec with ALPN set to
 // [http/1.1] for the third-party ordered-HTTP/1.1 path, or nil when no
-// fingerprint is configured.
+// fingerprint is configured. ALPN must stay http/1.1-only here: the ordered-h1
+// transport writes HTTP/1.1 framing onto the returned connection, so advertising
+// h2 risks an upstream negotiating h2 and desynchronising the wire protocol.
 func ClaudeSpecH1() *tls.ClientHelloSpec {
 	return active().SpecWithALPN("http/1.1")
 }

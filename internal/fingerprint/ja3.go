@@ -150,6 +150,36 @@ func SpecFromRaw(rec []byte) (*tls.ClientHelloSpec, error) {
 	return spec, nil
 }
 
+// ensureSNIExtension guarantees the spec carries a server_name (SNI) extension so
+// utls emits SNI on the wire. The Claude ClientHello is captured by pointing
+// claude.exe at a local listener addressed by IP (https://127.0.0.1:<port>); per
+// RFC 6066 a TLS client sends no server_name for an IP literal, so the captured
+// record — and every spec reconstructed from it — has no SNI extension at all.
+//
+// utls only fills in ServerName for an SNIExtension that already exists in the
+// spec (ApplyPreset seeds ext.ServerName from config.ServerName when it is
+// empty); it never adds a missing one. Without this, the reconstructed
+// ClientHello reaches the upstream with no SNI, and SNI-routed edges (e.g. Aliyun
+// ESA in front of some third-party relays) cannot select the right certificate
+// and serve a fallback cert, which then fails hostname verification.
+//
+// A real claude.exe talking to a hostname (api.anthropic.com) does send SNI, so
+// adding an empty SNIExtension — whose ServerName utls fills per-connection with
+// the actual target host — restores the authentic wire image rather than
+// diverging from it. OpenSSL/BoringSSL clients place server_name first, so it is
+// prepended. No-op when an SNI extension is already present.
+func ensureSNIExtension(spec *tls.ClientHelloSpec) {
+	if spec == nil {
+		return
+	}
+	for _, ext := range spec.Extensions {
+		if _, ok := ext.(*tls.SNIExtension); ok {
+			return
+		}
+	}
+	spec.Extensions = append([]tls.TLSExtension{&tls.SNIExtension{}}, spec.Extensions...)
+}
+
 // overrideALPN sets the ALPN protocol list on any ALPN extension present in the
 // spec. JA3 keys on extension types, not their contents, so swapping the ALPN
 // value keeps the JA3 hash identical while letting the official path advertise
