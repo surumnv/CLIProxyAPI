@@ -3,6 +3,7 @@ package executor
 import "context"
 
 type downstreamWebsocketContextKey struct{}
+type requireUpstreamWebsocketContextKey struct{}
 
 // WithDownstreamWebsocket marks the current request as coming from a downstream websocket connection.
 func WithDownstreamWebsocket(ctx context.Context) context.Context {
@@ -56,6 +57,7 @@ type claudeFingerprintContextKey struct{}
 //   - the official api.anthropic.com HTTP/2 utls path, and
 //   - third-party ordered-HTTP/1.1 hosts, where the host alone is not a
 //     reliable signal that the request is Claude-bound.
+//
 // Mirrors WithSChannelTLS.
 func WithClaudeFingerprint(ctx context.Context) context.Context {
 	if ctx == nil {
@@ -101,5 +103,23 @@ func LowercaseHeadersFromContext(ctx context.Context) bool {
 		return false
 	}
 	enabled, ok := ctx.Value(lowercaseHeadersContextKey{}).(bool)
+	return ok && enabled
+}
+
+// WithRequiredUpstreamWebsocket marks a request whose incremental context is valid only on the current upstream websocket.
+func WithRequiredUpstreamWebsocket(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, requireUpstreamWebsocketContextKey{}, true)
+}
+
+// RequiredUpstreamWebsocket reports whether falling back to an HTTP upstream would lose request context.
+func RequiredUpstreamWebsocket(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	raw := ctx.Value(requireUpstreamWebsocketContextKey{})
+	enabled, ok := raw.(bool)
 	return ok && enabled
 }
