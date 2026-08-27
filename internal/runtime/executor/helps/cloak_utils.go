@@ -54,3 +54,10 @@ func ShouldCloak(cloakMode string, userAgent string) bool {
 func isClaudeCodeClient(userAgent string) bool {
 	return strings.HasPrefix(userAgent, "claude-cli")
 }
+
+// IsClaudeCodeClient reports whether the User-Agent belongs to Claude Code.
+// Callers use this classification to preserve native Claude client identity
+// while replacing other client identities before an upstream Claude request.
+func IsClaudeCodeClient(userAgent string) bool {
+	return isClaudeCodeClient(strings.TrimSpace(userAgent))
+}

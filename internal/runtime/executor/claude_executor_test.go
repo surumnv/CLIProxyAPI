@@ -19,6 +19,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	xxHash64 "github.com/pierrec/xxHash/xxHash64"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -151,7 +152,7 @@ func TestApplyClaudeHeaders_TracksHighestClaudeCLIFingerprint(t *testing.T) {
 		"X-Stainless-Arch":            []string{"x64"},
 	})
 	applyClaudeHeaders(thirdPartyReq, auth, "key-upgrade", false, nil, cfg)
-	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.62 (external, cli)", "0.74.0", "v24.3.0", "MacOS", "arm64")
+	assertClaudeFingerprint(t, thirdPartyReq.Header, misc.LocalClaudeCodeUserAgent(), "0.74.0", "v24.3.0", "MacOS", "arm64")
 
 	higherReq := newClaudeHeaderTestRequest(t, http.Header{
 		"User-Agent":                  []string{"claude-cli/2.1.63 (external, cli)"},
@@ -265,7 +266,7 @@ func TestApplyClaudeHeaders_UpgradesCachedSoftwareFingerprintWhenBaselineAdvance
 		"X-Stainless-Arch":            []string{"x64"},
 	})
 	applyClaudeHeaders(thirdPartyReq, auth, "key-baseline-reload", false, nil, newCfg)
-	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.77 (external, cli)", "0.87.0", "v24.8.0", "MacOS", "arm64")
+	assertClaudeFingerprint(t, thirdPartyReq.Header, misc.LocalClaudeCodeUserAgent(), "0.87.0", "v24.8.0", "MacOS", "arm64")
 }
 
 func TestApplyClaudeHeaders_LearnsOfficialFingerprintAfterCustomBaselineFallback(t *testing.T) {
@@ -297,7 +298,7 @@ func TestApplyClaudeHeaders_LearnsOfficialFingerprintAfterCustomBaselineFallback
 		"X-Stainless-Arch":            []string{"x64"},
 	})
 	applyClaudeHeaders(thirdPartyReq, auth, "key-custom-baseline-learning", false, nil, cfg)
-	assertClaudeFingerprint(t, thirdPartyReq.Header, "my-gateway/1.0", "custom-pkg", "custom-runtime", "MacOS", "arm64")
+	assertClaudeFingerprint(t, thirdPartyReq.Header, misc.LocalClaudeCodeUserAgent(), "custom-pkg", "custom-runtime", "MacOS", "arm64")
 
 	officialReq := newClaudeHeaderTestRequest(t, http.Header{
 		"User-Agent":                  []string{"claude-cli/2.1.77 (external, cli)"},
@@ -317,7 +318,7 @@ func TestApplyClaudeHeaders_LearnsOfficialFingerprintAfterCustomBaselineFallback
 		"X-Stainless-Arch":            []string{"x64"},
 	})
 	applyClaudeHeaders(postLearningThirdPartyReq, auth, "key-custom-baseline-learning", false, nil, cfg)
-	assertClaudeFingerprint(t, postLearningThirdPartyReq.Header, "claude-cli/2.1.77 (external, cli)", "0.87.0", "v24.8.0", "MacOS", "arm64")
+	assertClaudeFingerprint(t, postLearningThirdPartyReq.Header, misc.LocalClaudeCodeUserAgent(), "0.87.0", "v24.8.0", "MacOS", "arm64")
 }
 
 func TestResolveClaudeDeviceProfile_RechecksCacheBeforeStoringCandidate(t *testing.T) {
@@ -449,7 +450,7 @@ func TestApplyClaudeHeaders_ThirdPartyBaselineThenOfficialUpgradeKeepsPinnedPlat
 		"X-Stainless-Arch":            []string{"x64"},
 	})
 	applyClaudeHeaders(thirdPartyReq, auth, "key-third-party-then-official", false, nil, cfg)
-	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.70 (external, cli)", "0.80.0", "v24.5.0", "MacOS", "arm64")
+	assertClaudeFingerprint(t, thirdPartyReq.Header, misc.LocalClaudeCodeUserAgent(), "0.80.0", "v24.5.0", "MacOS", "arm64")
 
 	officialReq := newClaudeHeaderTestRequest(t, http.Header{
 		"User-Agent":                  []string{"claude-cli/2.1.77 (external, cli)"},
@@ -501,7 +502,7 @@ func TestApplyClaudeHeaders_DisableDeviceProfileStabilization(t *testing.T) {
 		"X-Stainless-Arch":            []string{"x64"},
 	})
 	applyClaudeHeaders(thirdPartyReq, auth, "key-disable-stability", false, nil, cfg)
-	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.60 (external, cli)", "0.10.0", "v18.0.0", "Windows", "x64")
+	assertClaudeFingerprint(t, thirdPartyReq.Header, misc.LocalClaudeCodeUserAgent(), "0.10.0", "v18.0.0", "Windows", "x64")
 
 	lowerReq := newClaudeHeaderTestRequest(t, http.Header{
 		"User-Agent":                  []string{"claude-cli/2.1.61 (external, cli)"},
@@ -572,7 +573,7 @@ func TestApplyClaudeHeaders_LegacyModeFallsBackToRuntimeOSArchWhenMissing(t *tes
 	})
 	applyClaudeHeaders(req, auth, "key-legacy-runtime-os-arch", false, nil, cfg)
 
-	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.60 (external, cli)", "0.70.0", "v22.0.0", helps.MapStainlessOS(), helps.MapStainlessArch())
+	assertClaudeFingerprint(t, req.Header, misc.LocalClaudeCodeUserAgent(), "0.70.0", "v22.0.0", helps.MapStainlessOS(), helps.MapStainlessArch())
 }
 
 func TestApplyClaudeHeaders_UnsetStabilizationAlsoUsesLegacyRuntimeOSArchFallback(t *testing.T) {
@@ -599,7 +600,172 @@ func TestApplyClaudeHeaders_UnsetStabilizationAlsoUsesLegacyRuntimeOSArchFallbac
 	})
 	applyClaudeHeaders(req, auth, "key-unset-runtime-os-arch", false, nil, cfg)
 
-	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.60 (external, cli)", "0.70.0", "v22.0.0", helps.MapStainlessOS(), helps.MapStainlessArch())
+	assertClaudeFingerprint(t, req.Header, misc.LocalClaudeCodeUserAgent(), "0.70.0", "v22.0.0", helps.MapStainlessOS(), helps.MapStainlessArch())
+}
+
+func TestApplyClaudeHeaders_UsesLocalClaudeUAForNonClaudeIncomingHeaders(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+	stabilize := false
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			UserAgent:              "claude-cli/2.1.63 (external, cli)",
+			PackageVersion:         "0.74.0",
+			RuntimeVersion:         "v24.3.0",
+			StabilizeDeviceProfile: &stabilize,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-local-ua-incoming-headers",
+		Attributes: map[string]string{
+			"api_key": "key-local-ua-incoming-headers",
+		},
+	}
+	req := httptest.NewRequest(http.MethodPost, "https://relay.example/v1/messages", nil)
+	incoming := http.Header{
+		"User-Agent":               {"codex_cli_rs/0.115.0 (Windows; x86_64)"},
+		"Originator":               {"Codex Desktop"},
+		"Session-Id":               {"session-1"},
+		"Thread-Id":                {"thread-1"},
+		"X-Client-Request-Id":      {"request-1"},
+		"X-Claude-Code-Session-Id": {"claude-session-1"},
+		"X-Codex-Beta-Features":    {"remote_compaction_v2"},
+		"X-Codex-Turn-Metadata":    {"turn-1"},
+		"X-Codex-Window-Id":        {"window-1"},
+		"X-Trace-Id":               {"trace-1"},
+	}
+
+	if err := applyClaudeHeaders(req, auth, "key-local-ua-incoming-headers", false, nil, cfg, incoming); err != nil {
+		t.Fatalf("applyClaudeHeaders() error = %v", err)
+	}
+	if got := req.Header.Get("User-Agent"); got != misc.LocalClaudeCodeUserAgent() {
+		t.Fatalf("User-Agent = %q, want local Claude UA %q", got, misc.LocalClaudeCodeUserAgent())
+	}
+	for _, headerName := range []string{
+		"Originator",
+		"Session-Id",
+		"Thread-Id",
+		"X-Client-Request-Id",
+		"X-Codex-Beta-Features",
+		"X-Codex-Turn-Metadata",
+		"X-Codex-Window-Id",
+	} {
+		if got := req.Header.Get(headerName); got != "" {
+			t.Fatalf("%s = %q, want filtered", headerName, got)
+		}
+	}
+	if got := req.Header.Get("X-Claude-Code-Session-Id"); got == "" || got == "claude-session-1" {
+		t.Fatalf("X-Claude-Code-Session-Id = %q, want a generated value different from the non-Claude inbound value", got)
+	}
+	if got := req.Header.Get("X-Trace-Id"); got != "trace-1" {
+		t.Fatalf("X-Trace-Id = %q, want passthrough value", got)
+	}
+}
+
+func TestApplyClaudeHeaders_PreservesClaudeIncomingUAFromExplicitHeaders(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+	auth := &cliproxyauth.Auth{
+		ID: "auth-claude-ua-incoming-headers",
+		Attributes: map[string]string{
+			"api_key": "key-claude-ua-incoming-headers",
+		},
+	}
+	req := httptest.NewRequest(http.MethodPost, "https://relay.example/v1/messages", nil)
+	incoming := http.Header{
+		"User-Agent":               {"claude-cli/2.1.220 (external, cli)"},
+		"X-Claude-Code-Session-Id": {"session-from-claude"},
+		"X-Client-Request-Id":      {"request-from-claude"},
+		"Originator":               {"Claude Desktop"},
+	}
+
+	if err := applyClaudeHeaders(req, auth, "key-claude-ua-incoming-headers", false, nil, nil, incoming); err != nil {
+		t.Fatalf("applyClaudeHeaders() error = %v", err)
+	}
+	if got := req.Header.Get("User-Agent"); got != incoming.Get("User-Agent") {
+		t.Fatalf("User-Agent = %q, want incoming Claude UA %q", got, incoming.Get("User-Agent"))
+	}
+	if got := req.Header.Get("X-Claude-Code-Session-Id"); got != incoming.Get("X-Claude-Code-Session-Id") {
+		t.Fatalf("X-Claude-Code-Session-Id = %q, want incoming value %q", got, incoming.Get("X-Claude-Code-Session-Id"))
+	}
+	if got := req.Header.Get("X-Client-Request-Id"); got != incoming.Get("X-Client-Request-Id") {
+		t.Fatalf("X-Client-Request-Id = %q, want incoming value %q", got, incoming.Get("X-Client-Request-Id"))
+	}
+	if got := req.Header.Get("Originator"); got != incoming.Get("Originator") {
+		t.Fatalf("Originator = %q, want incoming value %q", got, incoming.Get("Originator"))
+	}
+}
+
+func TestClaudeExecutor_ResponsesToMessagesUsesLocalClaudeUAForCodex(t *testing.T) {
+	var seenUA string
+	var seenBody []byte
+	seenHeaders := make(http.Header)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		seenUA = r.Header.Get("User-Agent")
+		seenHeaders = r.Header.Clone()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"type":"message_start","message":{"id":"msg_codex_ua","model":"claude-opus-5"}}`,
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":1,"output_tokens":1}}`,
+			`data: {"type":"message_stop"}`,
+			``,
+		}, "\n")))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			UserAgent: "claude-cli/2.1.63 (external, cli)",
+		},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-responses-codex-ua",
+		"base_url": server.URL,
+	}}
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-opus-5",
+		Payload: []byte(`{"model":"gpt-5.4","reasoning":{"effort":"max","summary":"detailed"},"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Headers: http.Header{
+			"User-Agent":            {"codex_cli_rs/0.115.0 (Windows; x86_64)"},
+			"X-Codex-Turn-Metadata": {"turn-from-codex"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if seenUA != misc.LocalClaudeCodeUserAgent() {
+		t.Fatalf("upstream User-Agent = %q, want local Claude UA %q", seenUA, misc.LocalClaudeCodeUserAgent())
+	}
+	if got := seenHeaders.Get("X-Codex-Turn-Metadata"); got != "" {
+		t.Fatalf("upstream X-Codex-Turn-Metadata = %q, want filtered", got)
+	}
+	if got := seenHeaders.Get("Originator"); got != "" {
+		t.Fatalf("upstream Originator = %q, want filtered", got)
+	}
+	if got := seenHeaders.Get("Session-Id"); got != "" {
+		t.Fatalf("upstream Session-Id = %q, want filtered", got)
+	}
+	if got := seenHeaders.Get("Thread-Id"); got != "" {
+		t.Fatalf("upstream Thread-Id = %q, want filtered", got)
+	}
+	if got := seenHeaders.Get("X-Client-Request-Id"); got != "" {
+		t.Fatalf("upstream X-Client-Request-Id = %q, want filtered", got)
+	}
+	if got := gjson.GetBytes(seenBody, "thinking.type").String(); got != "adaptive" {
+		t.Fatalf("upstream thinking.type = %q, want adaptive; body=%s", got, string(seenBody))
+	}
+	if got := gjson.GetBytes(seenBody, "thinking.display").String(); got != "summarized" {
+		t.Fatalf("upstream thinking.display = %q, want summarized; body=%s", got, string(seenBody))
+	}
+	if got := gjson.GetBytes(seenBody, "output_config.effort").String(); got != "max" {
+		t.Fatalf("upstream output_config.effort = %q, want max; body=%s", got, string(seenBody))
+	}
+	if gjson.GetBytes(seenBody, "thinking.budget_tokens").Exists() {
+		t.Fatalf("upstream body contains thinking.budget_tokens: %s", string(seenBody))
+	}
 }
 
 func TestClaudeDeviceProfileStabilizationEnabled_DefaultFalse(t *testing.T) {

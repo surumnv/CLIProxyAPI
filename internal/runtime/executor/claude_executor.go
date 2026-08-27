@@ -45,6 +45,13 @@ type ClaudeExecutor struct {
 // Previously "proxy_" was used but this is a detectable fingerprint difference.
 const claudeToolPrefix = ""
 
+// claudeEffortBeta gates the adaptive thinking effort field. Without it the upstream
+// ignores output_config.effort and falls back to its own default level, so a client
+// that asked for "high" or "max" is silently downgraded. Real Claude Code only sends
+// this beta on requests that actually carry an effort value, so it is injected on
+// demand rather than added to the default beta list.
+const claudeEffortBeta = "effort-2025-11-24"
+
 func shouldSanitizeClaudeMessagesForUpstream(baseModel string) bool {
 	return sigcompat.SignatureProviderFromModelName(baseModel) == sigcompat.SignatureProviderClaude
 }
@@ -56,7 +63,27 @@ func sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx context.Context, body 
 		sanitized, report = sigcompat.SanitizeClaudeMessagesForClaudeUpstream(body, baseModel)
 		logClaudeSignatureSanitizeReport(ctx, baseModel, report)
 	}
-	return sanitizeClaudeWebSearchDomains(sanitized)
+	sanitized = sanitizeClaudeWebSearchDomains(sanitized)
+	return sanitizeClaudeToolSchemas(ctx, sanitized)
+}
+
+// sanitizeClaudeToolSchemas rewrites tool input_schema objects that declare a
+// union (oneOf/anyOf/allOf) at the top level. Anthropic documents input_schema
+// as a JSON Schema subset whose root must be a plain object, and upstreams
+// reject a root-level union outright: Codex's mcp__codex_app__automation_update
+// sends {"type":"object","properties":{},"oneOf":[...]} and the request fails
+// before any token is generated. Nested unions are accepted and left alone.
+func sanitizeClaudeToolSchemas(ctx context.Context, body []byte) []byte {
+	sanitized, rewritten := helps.NormalizeClaudeToolSchemas(body)
+	if len(rewritten) > 0 {
+		helps.LogWithRequestID(ctx).WithFields(log.Fields{
+			"component": "tool_schema_sanitizer",
+			"executor":  "claude",
+			"action":    "lift_root_union",
+			"tools":     rewritten,
+		}).Debug("claude executor: normalized tool input_schema root union before upstream")
+	}
+	return sanitized
 }
 
 // sanitizeClaudeWebSearchDomains removes empty allowed_domains/blocked_domains
@@ -282,13 +309,16 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
 	}
 	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
+	// Evaluated against the final upstream body: earlier stages such as
+	// disableThinkingIfToolChoiceForced can drop output_config.effort again.
+	extraBetas = appendEffortBetaIfNeeded(bodyForUpstream, extraBetas)
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
 	if err != nil {
 		return resp, err
 	}
-	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg); errHeaders != nil {
+	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, opts.Headers); errHeaders != nil {
 		return resp, errHeaders
 	}
 	var authID, authLabel, authType, authValue string
@@ -472,13 +502,14 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
 	}
 	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
+	extraBetas = appendEffortBetaIfNeeded(bodyForUpstream, extraBetas)
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
 	if err != nil {
 		return nil, err
 	}
-	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg); errHeaders != nil {
+	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg, opts.Headers); errHeaders != nil {
 		return nil, errHeaders
 	}
 	var authID, authLabel, authType, authValue string
@@ -729,13 +760,14 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		body, _ = prepareClaudeOAuthToolNamesForUpstream(body, claudeToolPrefix, auth.ToolPrefixDisabled())
 	}
 	body = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, body, baseModel)
+	extraBetas = appendEffortBetaIfNeeded(body, extraBetas)
 
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg); errHeaders != nil {
+	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, opts.Headers); errHeaders != nil {
 		return cliproxyexecutor.Response{}, errHeaders
 	}
 	var authID, authLabel, authType, authValue string
@@ -867,6 +899,24 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 	}
 	body, _ = sjson.DeleteBytes(body, "betas")
 	return betas, body
+}
+
+// appendEffortBetaIfNeeded adds the effort beta when the outbound body carries
+// output_config.effort. Adaptive thinking writes that field, but upstreams only
+// honour it when the effort beta is negotiated; without the beta the effort value
+// is silently ignored and the request falls back to the default reasoning level.
+// The beta is appended only when the field is present so requests that do not use
+// adaptive thinking keep the same beta set real Claude clients send.
+func appendEffortBetaIfNeeded(body []byte, betas []string) []string {
+	if strings.TrimSpace(gjson.GetBytes(body, "output_config.effort").String()) == "" {
+		return betas
+	}
+	for _, beta := range betas {
+		if strings.EqualFold(strings.TrimSpace(beta), claudeEffortBeta) {
+			return betas
+		}
+	}
+	return append(betas, claudeEffortBeta)
 }
 
 // disableThinkingIfToolChoiceForced checks if tool_choice forces tool use and disables thinking.
@@ -1067,7 +1117,26 @@ func stripInjectedOAuthBetas(betas string) string {
 	return strings.Join(kept, ",")
 }
 
-func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config) error {
+func filterNonClaudeInboundHeaders(headers http.Header) http.Header {
+	if len(headers) == 0 {
+		return headers
+	}
+	filtered := headers.Clone()
+	for key := range filtered {
+		lowerKey := strings.ToLower(strings.TrimSpace(key))
+		switch lowerKey {
+		case "originator", "session-id", "thread-id", "x-client-request-id", "x-claude-code-session-id":
+			delete(filtered, key)
+		default:
+			if strings.HasPrefix(lowerKey, "x-codex-") {
+				delete(filtered, key)
+			}
+		}
+	}
+	return filtered
+}
+
+func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config, incomingHeaders ...http.Header) error {
 	if r == nil {
 		return nil
 	}
@@ -1094,8 +1163,17 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	r.Header.Set("Content-Type", "application/json")
 
 	var ginHeaders http.Header
-	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-		ginHeaders = ginCtx.Request.Header
+	if len(incomingHeaders) > 0 {
+		ginHeaders = incomingHeaders[0]
+	}
+	if ginHeaders == nil {
+		if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+			ginHeaders = ginCtx.Request.Header
+		}
+	}
+	inboundClaudeClient := helps.IsClaudeCodeClient(ginHeaders.Get("User-Agent"))
+	if !inboundClaudeClient {
+		ginHeaders = filterNonClaudeInboundHeaders(ginHeaders)
 	}
 	stabilizeDeviceProfile := helps.ClaudeDeviceProfileStabilizationEnabled(cfg)
 	var deviceProfile helps.ClaudeDeviceProfile
@@ -1199,6 +1277,12 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile)
 	} else {
 		helps.ApplyClaudeLegacyDeviceHeaders(r, ginHeaders, cfg)
+	}
+	// Preserve the native Claude CLI/Desktop identity, but do not forward an
+	// unrelated client's identity to the Claude upstream. This runs before
+	// passthrough so CopyInboundHeaders cannot restore the inbound non-Claude UA.
+	if !inboundClaudeClient {
+		r.Header.Set("User-Agent", misc.LocalClaudeCodeUserAgent())
 	}
 	// Best-effort passthrough of remaining inbound Claude Desktop headers (e.g. the
 	// X-Stainless-* device fingerprint, X-Claude-Code-Session-Id, and any header a
