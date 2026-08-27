@@ -631,7 +631,10 @@ func TestApplyClaudeHeaders_UsesLocalClaudeUAForNonClaudeIncomingHeaders(t *test
 		"X-Codex-Beta-Features":    {"remote_compaction_v2"},
 		"X-Codex-Turn-Metadata":    {"turn-1"},
 		"X-Codex-Window-Id":        {"window-1"},
-		"X-Trace-Id":               {"trace-1"},
+		"X-Openai-Internal-Codex-Responses-Lite": {"true"},
+		"Openai-Beta":                            {"responses=v1"},
+		"Chatgpt-Account-Id":                     {"acct-1"},
+		"X-Trace-Id":                             {"trace-1"},
 	}
 
 	if err := applyClaudeHeaders(req, auth, "key-local-ua-incoming-headers", false, nil, cfg, incoming); err != nil {
@@ -648,6 +651,9 @@ func TestApplyClaudeHeaders_UsesLocalClaudeUAForNonClaudeIncomingHeaders(t *test
 		"X-Codex-Beta-Features",
 		"X-Codex-Turn-Metadata",
 		"X-Codex-Window-Id",
+		"X-Openai-Internal-Codex-Responses-Lite",
+		"Openai-Beta",
+		"Chatgpt-Account-Id",
 	} {
 		if got := req.Header.Get(headerName); got != "" {
 			t.Fatalf("%s = %q, want filtered", headerName, got)

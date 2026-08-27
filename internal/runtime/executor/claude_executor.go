@@ -1117,6 +1117,24 @@ func stripInjectedOAuthBetas(betas string) string {
 	return strings.Join(kept, ",")
 }
 
+// nonClaudeInboundHeaderPrefixes are header name prefixes that only a non-Claude
+// client emits. They are transport hints for the Codex/OpenAI upstream and carry
+// no meaning for a Claude upstream, so forwarding them just contradicts the
+// Claude Code identity the rest of the request presents.
+var nonClaudeInboundHeaderPrefixes = []string{"x-codex-", "x-openai-", "openai-"}
+
+// nonClaudeInboundHeaderNames are exact client-identity headers dropped for the
+// same reason. chatgpt-account-id is the most sensitive of them: it names the
+// caller's ChatGPT account and must never reach an unrelated Claude relay.
+var nonClaudeInboundHeaderNames = map[string]struct{}{
+	"originator":               {},
+	"session-id":               {},
+	"thread-id":                {},
+	"x-client-request-id":      {},
+	"x-claude-code-session-id": {},
+	"chatgpt-account-id":       {},
+}
+
 func filterNonClaudeInboundHeaders(headers http.Header) http.Header {
 	if len(headers) == 0 {
 		return headers
@@ -1124,12 +1142,14 @@ func filterNonClaudeInboundHeaders(headers http.Header) http.Header {
 	filtered := headers.Clone()
 	for key := range filtered {
 		lowerKey := strings.ToLower(strings.TrimSpace(key))
-		switch lowerKey {
-		case "originator", "session-id", "thread-id", "x-client-request-id", "x-claude-code-session-id":
+		if _, drop := nonClaudeInboundHeaderNames[lowerKey]; drop {
 			delete(filtered, key)
-		default:
-			if strings.HasPrefix(lowerKey, "x-codex-") {
+			continue
+		}
+		for _, prefix := range nonClaudeInboundHeaderPrefixes {
+			if strings.HasPrefix(lowerKey, prefix) {
 				delete(filtered, key)
+				break
 			}
 		}
 	}
