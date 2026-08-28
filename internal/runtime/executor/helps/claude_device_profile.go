@@ -597,6 +597,27 @@ func ApplyClaudeDefaultDeviceProfileHeaders(r *http.Request, cfg *config.Config)
 	ApplyClaudeDeviceProfileHeaders(r, defaultClaudeDeviceProfile(cfg))
 }
 
+// legacyClaudePlatform resolves the X-Stainless-Os / X-Stainless-Arch pair used
+// for callers that are not confirmed Claude Code clients. An explicit
+// claude-header-defaults os/arch wins; otherwise the real local platform is
+// reported, so the outbound fingerprint names the machine that actually issues
+// the request instead of the fixed MacOS/arm64 software baseline.
+func legacyClaudePlatform(cfg *config.Config) (string, string) {
+	var hd config.ClaudeHeaderDefaults
+	if cfg != nil {
+		hd = cfg.ClaudeHeaderDefaults
+	}
+	osName := strings.TrimSpace(hd.OS)
+	if osName == "" {
+		osName = mapStainlessOS()
+	}
+	arch := strings.TrimSpace(hd.Arch)
+	if arch == "" {
+		arch = mapStainlessArch()
+	}
+	return osName, arch
+}
+
 func ApplyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg *config.Config, confirmedClaudeCode bool) {
 	if r == nil {
 		return
@@ -628,7 +649,8 @@ func ApplyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg
 	// into the upstream Claude Code SDK fingerprint.
 	r.Header.Set("X-Stainless-Runtime-Version", profile.RuntimeVersion)
 	r.Header.Set("X-Stainless-Package-Version", profile.PackageVersion)
-	r.Header.Set("X-Stainless-Os", profile.OS)
-	r.Header.Set("X-Stainless-Arch", profile.Arch)
+	legacyOS, legacyArch := legacyClaudePlatform(cfg)
+	r.Header.Set("X-Stainless-Os", legacyOS)
+	r.Header.Set("X-Stainless-Arch", legacyArch)
 	r.Header.Set("User-Agent", profile.UserAgent)
 }
