@@ -29,6 +29,22 @@ func TestMaybeMarkSChannelTLS(t *testing.T) {
 			wantSet: true,
 		},
 		{
+			// Real Codex traffic arrives as openai-response: the client posts to
+			// /v1/responses and that handler reports HandlerType() ==
+			// constant.OpenaiResponse. No inbound path ever produces the literal
+			// "codex", so this case is the one that matters in production.
+			name:    "openai-response source with toggle on marks context",
+			cfg:     &config.Config{SChannelTLS: true},
+			opts:    opts("openai-response"),
+			wantSet: true,
+		},
+		{
+			name:    "openai-response source but toggle off leaves context untouched",
+			cfg:     &config.Config{SChannelTLS: false},
+			opts:    opts("openai-response"),
+			wantSet: false,
+		},
+		{
 			name:    "codex source but toggle off leaves context untouched",
 			cfg:     &config.Config{SChannelTLS: false},
 			opts:    opts("codex"),
@@ -44,6 +60,18 @@ func TestMaybeMarkSChannelTLS(t *testing.T) {
 			name:    "openai source with toggle on is not marked",
 			cfg:     &config.Config{SChannelTLS: true},
 			opts:    opts("openai"),
+			wantSet: false,
+		},
+		{
+			name:    "gemini source with toggle on is not marked",
+			cfg:     &config.Config{SChannelTLS: true},
+			opts:    opts("gemini"),
+			wantSet: false,
+		},
+		{
+			name:    "empty source is not marked",
+			cfg:     &config.Config{SChannelTLS: true},
+			opts:    opts(""),
 			wantSet: false,
 		},
 		{
@@ -84,6 +112,12 @@ func TestMaybeMarkLowercaseHeaders(t *testing.T) {
 			wantSet: true,
 		},
 		{
+			// The label real Codex traffic carries; see TestMaybeMarkSChannelTLS.
+			name:    "openai-response source is marked",
+			opts:    opts("openai-response"),
+			wantSet: true,
+		},
+		{
 			// Critical: Claude wire header names are mixed-case; lowercasing
 			// them would create a fingerprint mismatch, so it must stay unset.
 			name:    "claude source is never marked",
@@ -93,6 +127,11 @@ func TestMaybeMarkLowercaseHeaders(t *testing.T) {
 		{
 			name:    "openai source is not marked",
 			opts:    opts("openai"),
+			wantSet: false,
+		},
+		{
+			name:    "empty source is not marked",
+			opts:    opts(""),
 			wantSet: false,
 		},
 	}
