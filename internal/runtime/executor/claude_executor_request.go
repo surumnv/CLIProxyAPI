@@ -402,12 +402,9 @@ func disableThinkingIfToolChoiceForced(body []byte) []byte {
 
 // normalizeClaudeSamplingForUpstream keeps Anthropic message requests valid.
 //
-// Translated and cloaked callers keep the caller's temperature: this fork
-// forwards it deliberately (commit dc0f7f9b) because third-party
-// Anthropic-compatible relays honour it, and silently deleting it changed the
-// sampling a client explicitly asked for. Only the combinations Anthropic
-// actually rejects are removed, which for these callers means top_p and top_k
-// while thinking is active.
+// Translated and cloaked callers are normalized by
+// helps.ForkNormalizeNonNativeClaudeSampling: this fork forwards the caller's
+// temperature and removes only what Anthropic actually rejects.
 //
 // A confirmed native Claude Code client owns its own wire, exactly like
 // cache_control placement. The measured structured Haiku helper sends
@@ -424,16 +421,7 @@ func normalizeClaudeSamplingForUpstream(body []byte, nativeOwned bool) []byte {
 	}
 
 	if !nativeOwned {
-		// Fork behavior (commit dc0f7f9b): the caller's temperature is forwarded
-		// instead of stripped. Third-party Anthropic-compatible relays honour it and
-		// clients that set it expect it to take effect, so dropping it silently
-		// changed sampling. top_p and top_k are still removed while thinking is
-		// active because Anthropic rejects them in that combination.
-		if thinkingActive {
-			body, _ = sjson.DeleteBytes(body, "top_p")
-			body, _ = sjson.DeleteBytes(body, "top_k")
-		}
-		return body
+		return helps.ForkNormalizeNonNativeClaudeSampling(body, thinkingActive)
 	}
 
 	if thinkingActive {
@@ -626,48 +614,6 @@ func claudeCredentialUsesOAuth(auth *cliproxyauth.Auth, apiKey string) bool {
 	return !hasAPIKeyAttr
 }
 
-// nonClaudeInboundHeaderPrefixes are header name prefixes that only a non-Claude
-// client emits. They are transport hints for the Codex/OpenAI upstream and carry
-// no meaning for a Claude upstream, so forwarding them just contradicts the
-// Claude Code identity the rest of the request presents.
-var nonClaudeInboundHeaderPrefixes = []string{"x-codex-", "x-openai-", "openai-"}
-
-// nonClaudeInboundHeaderNames are exact client-identity headers dropped for the
-// same reason. chatgpt-account-id is the most sensitive of them: it names the
-// caller's ChatGPT account and must never reach an unrelated Claude relay.
-var nonClaudeInboundHeaderNames = map[string]struct{}{
-	"originator":               {},
-	"session-id":               {},
-	"thread-id":                {},
-	"x-client-request-id":      {},
-	"x-claude-code-session-id": {},
-	"chatgpt-account-id":       {},
-}
-
-// filterNonClaudeInboundHeaders returns a copy of headers without the identity
-// and transport headers listed above. The input is never mutated: the caller
-// keeps the original inbound header set for its own bookkeeping.
-func filterNonClaudeInboundHeaders(headers http.Header) http.Header {
-	if len(headers) == 0 {
-		return headers
-	}
-	filtered := headers.Clone()
-	for key := range filtered {
-		lowerKey := strings.ToLower(strings.TrimSpace(key))
-		if _, drop := nonClaudeInboundHeaderNames[lowerKey]; drop {
-			delete(filtered, key)
-			continue
-		}
-		for _, prefix := range nonClaudeInboundHeaderPrefixes {
-			if strings.HasPrefix(lowerKey, prefix) {
-				delete(filtered, key)
-				break
-			}
-		}
-	}
-	return filtered
-}
-
 func copyClaudeCallerFingerprintHeaders(dst, src http.Header) {
 	if dst == nil || src == nil {
 		return
@@ -854,15 +800,11 @@ func applyClaudeHeadersWithNativeProfile(
 			defaultAccept = "text/event-stream"
 			defaultAcceptEncoding = "identity"
 		}
-		// Fork behavior (commit de020b03): caller-owned mode must not hand a Claude
-		// upstream the identity of a client that is not Claude Code. A native
-		// claude-cli caller keeps its own wire untouched; every other caller has its
-		// client-identity headers dropped here, before any of them can be copied onto
-		// the upstream request below.
-		inboundClaudeClient := helps.IsClaudeCodeClient(incomingHeaders.Get("User-Agent"))
-		if !inboundClaudeClient {
-			incomingHeaders = filterNonClaudeInboundHeaders(incomingHeaders)
-		}
+		// Fork behavior (commit de020b03): a non-Claude caller loses its client-identity
+		// headers before anything can copy them onto the upstream request. Implementation
+		// lives in helps/fork_claude_caller_wire.go.
+		var inboundClaudeClient bool
+		incomingHeaders, inboundClaudeClient = helps.ForkFilterNonClaudeCallerHeaders(incomingHeaders)
 		copyClaudeCallerFingerprintHeaders(r.Header, incomingHeaders)
 		misc.EnsureHeader(r.Header, incomingHeaders, "Anthropic-Version", "2023-06-01")
 		misc.EnsureHeader(r.Header, incomingHeaders, "Accept", defaultAccept)
@@ -872,45 +814,17 @@ func applyClaudeHeadersWithNativeProfile(
 		// ("Go-http-client/1.1"), which upstreams read as a bot signature. Identify
 		// as CPA instead: honest about the hop, and not a fabricated client.
 		misc.EnsureHeader(r.Header, incomingHeaders, "User-Agent", "CLIProxyAPI/"+buildinfo.Version)
-		// Fork behavior (commit de020b03): a caller that announced a foreign client
-		// (Codex, lobe-chat, ...) is presented upstream as the locally installed
-		// Claude Code CLI instead of leaking that name. A caller that sent no
-		// User-Agent at all leaks no identity, so it keeps the CPA value set above.
-		if !inboundClaudeClient && strings.TrimSpace(incomingHeaders.Get("User-Agent")) != "" {
-			r.Header.Set("User-Agent", misc.LocalClaudeCodeUserAgent())
-			// The inbound X-Claude-Code-Session-Id was dropped with the rest of the
-			// foreign identity, and a request presenting the Claude Code CLI UA without
-			// one is itself an anomaly. Use the per-credential cached session ID.
-			sessionID, errCallerSessionID := helps.CachedSessionIDRequired(r.Context(), apiKey)
-			if errCallerSessionID != nil {
-				return errCallerSessionID
-			}
-			misc.EnsureHeader(r.Header, incomingHeaders, "X-Claude-Code-Session-Id", sessionID)
+		// Fork behavior (commit de020b03): a foreign caller is presented upstream as the
+		// locally installed Claude Code CLI, and the remaining inbound headers are passed
+		// through. Implementation lives in helps/fork_claude_caller_wire.go.
+		if errForkCallerWire := helps.ForkApplyNonClaudeCallerIdentity(r, incomingHeaders, inboundClaudeClient, apiKey); errForkCallerWire != nil {
+			return errForkCallerWire
 		}
 		applyBetaHeader()
 		var attrs map[string]string
 		if auth != nil {
 			attrs = auth.Attributes
 		}
-		// Fork behavior (commit de020b03): best-effort passthrough of the remaining
-		// inbound headers, so a native Claude Desktop / Claude Code caller keeps
-		// everything this whitelist does not name (Originator, X-Trace-Id, and any
-		// header a future release adds). CopyInboundHeaders never clobbers a value
-		// already on r, and its own denylist drops hop-by-hop, length, host and
-		// Accept-Encoding. The skip list keeps CPA in control of what it must own:
-		//   - Authorization / X-Api-Key: carry the proxy credential, never the
-		//     inbound token (Anthropic+API-key mode deliberately drops Authorization).
-		//   - Anthropic-Beta: already resolved by applyBetaHeader above.
-		//   - Accept: negotiated per stream / upstream above.
-		//   - Anthropic-Dangerous-Direct-Browser-Access: OAuth mode intentionally
-		//     omits it, so it must not be resurrected from the inbound request.
-		util.CopyInboundHeaders(r, incomingHeaders,
-			"Authorization",
-			"X-Api-Key",
-			"Anthropic-Beta",
-			"Accept",
-			"Anthropic-Dangerous-Direct-Browser-Access",
-		)
 		util.ApplyCustomHeadersFromAttrs(r, attrs, incomingHeaders)
 		// Scope the custom-header escape hatch exactly like the CLI path below, which
 		// claws overrides back on api.anthropic.com (an operator Anthropic-Beta reaches
