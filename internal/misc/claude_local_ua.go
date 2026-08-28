@@ -6,13 +6,13 @@
 // relays/WAFs that block generic values like "Go-http-client/1.1", and so they
 // do not carry a mismatched Codex UA.
 //
-// Shape produced (Claude Code CLI form, entrypoint "cli"):
+// Shape produced (Claude Code CLI form, entrypoint "claude-desktop-3p"):
 //
-//	claude-cli/<version> (external, cli)
+//	claude-cli/<version> (external, claude-desktop-3p)
 //
 // The version tracks the Claude Code embedded in the locally installed Claude
 // Desktop app, NOT the standalone Claude Code CLI. These are different builds
-// with different versions (e.g. Desktop-embedded 2.1.209 vs standalone CLI
+// with different versions (e.g. Desktop-embedded 2.1.246 vs standalone CLI
 // 2.1.201), so we deliberately read the Desktop-embedded install location:
 //
 //	%LOCALAPPDATA%\Claude-3p\claude-code\<version>\claude.exe
@@ -45,11 +45,12 @@ import (
 )
 
 // LocalClaudeCodeUAFallback is returned when local detection of the Claude Code
-// CLI UA fails. It is a real, recent Claude Code UA (entrypoint "cli"); a
+// CLI UA fails. It is a real, recent Claude Code UA (entrypoint
+// "claude-desktop-3p", matching the Desktop-embedded CLI this build detects); a
 // slightly stale but genuine client string is far less likely to be blocked
 // than a synthetic one. Keep the version in sync with a known-good Claude
 // Desktop embedded claude-code version when bumping.
-const LocalClaudeCodeUAFallback = "claude-cli/2.1.209 (external, cli)"
+const LocalClaudeCodeUAFallback = "claude-cli/2.1.246 (external, claude-desktop-3p)"
 
 var (
 	claudeLocalUAMu     sync.Mutex
@@ -94,9 +95,11 @@ func buildLocalClaudeCodeUserAgent() string {
 	if version == "" {
 		return ""
 	}
-	// Entrypoint "cli": present the request as a normal Claude Code CLI probe
-	// rather than exposing the "claude-desktop-3p" embedded marker.
-	return "claude-cli/" + version + " (external, cli)"
+	// Entrypoint "claude-desktop-3p": the version reported here comes from the
+	// Claude Code embedded in Claude Desktop, so the entrypoint must name that
+	// same client. Reporting "cli" would pair a Desktop-only version with the
+	// standalone-CLI entrypoint, a combination no real client ever sends.
+	return "claude-cli/" + version + " (external, claude-desktop-3p)"
 }
 
 // detectClaudeDesktopEmbeddedVersion returns the highest installed version of

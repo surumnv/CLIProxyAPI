@@ -82,7 +82,7 @@ func TestBuildLocalClaudeCodeUserAgentFormat(t *testing.T) {
 	writeClaudeVersionDir(t, root, "2.1.209", true, true)
 
 	got := buildLocalClaudeCodeUserAgent()
-	want := "claude-cli/2.1.209 (external, cli)"
+	want := "claude-cli/2.1.209 (external, claude-desktop-3p)"
 	if got != want {
 		t.Fatalf("buildLocalClaudeCodeUserAgent() = %q, want %q", got, want)
 	}
