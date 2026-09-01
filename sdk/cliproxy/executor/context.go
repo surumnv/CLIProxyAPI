@@ -76,6 +76,38 @@ func ClaudeFingerprintFromContext(ctx context.Context) bool {
 	return ok && enabled
 }
 
+type codexLinuxFingerprintContextKey struct{}
+
+// WithCodexLinuxFingerprint marks the current outbound request so ordered-HTTP/1.1
+// TLS handshakes reproduce the declared Linux Codex CLI ClientHello shape (JA3
+// 0b85eb0d4981e69064e40753e4f0ac5f) via utls instead of the Windows SChannel
+// handshake.
+//
+// The Codex CLI builds its HTTP client on reqwest's default TLS backend, which
+// resolves to native-tls: SChannel on Windows, OpenSSL elsewhere. A Codex client
+// running under WSL2/Linux therefore emits a completely different ClientHello
+// than the Windows one, even though CPA itself runs on Windows. Which shape to
+// reproduce is decided per request from the inbound Codex User-Agent, so this
+// marker and WithSChannelTLS are mutually exclusive.
+//
+// Mirrors WithSChannelTLS and WithClaudeFingerprint.
+func WithCodexLinuxFingerprint(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, codexLinuxFingerprintContextKey{}, true)
+}
+
+// CodexLinuxFingerprintFromContext reports whether the current request opted into
+// the declared Linux Codex ClientHello shape via WithCodexLinuxFingerprint.
+func CodexLinuxFingerprintFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	enabled, ok := ctx.Value(codexLinuxFingerprintContextKey{}).(bool)
+	return ok && enabled
+}
+
 type lowercaseHeadersContextKey struct{}
 
 // WithLowercaseHeaders marks the current outbound request so the ordered-HTTP/1.1

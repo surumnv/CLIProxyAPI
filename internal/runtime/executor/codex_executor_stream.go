@@ -28,6 +28,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return e.executeOpenAIImageStream(ctx, auth, req, opts)
 	}
 	ctx = maybeMarkSChannelTLS(ctx, e.cfg, opts)
+	ctx = maybeMarkCodexLinuxFingerprint(ctx, e.cfg, opts)
 	ctx = maybeMarkLowercaseHeaders(ctx, opts)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 

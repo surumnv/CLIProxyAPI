@@ -471,7 +471,42 @@ func orderedH1ConnKey(req *http.Request) string {
 		}
 	}
 	addr := net.JoinHostPort(strings.ToLower(req.URL.Hostname()), port)
-	return req.URL.Scheme + "://" + addr
+	return req.URL.Scheme + "://" + addr + orderedH1TLSModeKey(req)
+}
+
+// orderedH1TLSModeKey returns the idle-pool key suffix identifying which TLS
+// handshake mode a connection was established with.
+//
+// Pooled connections may only be reused by a request that would have performed
+// the same handshake. handshakeOrderedH1TLS picks between several modes based on
+// per-request context markers (the Linux Codex ClientHello, Windows SChannel, the
+// captured Claude ClientHello, or plain crypto/tls), so keying the pool on
+// scheme/host/port alone lets a request adopt a live connection created with a
+// different ClientHello. That silently defeats the fingerprint alignment these
+// modes exist for: the TLS handshake, and therefore the observed JA3, happens
+// only once per connection.
+//
+// The suffix mirrors the branch order in handshakeOrderedH1TLS. Requests that opt
+// into no mode get an empty suffix, preserving the historical key for the default
+// crypto/tls path.
+func orderedH1TLSModeKey(req *http.Request) string {
+	if req == nil || req.URL == nil || req.URL.Scheme != "https" {
+		return ""
+	}
+	ctx := req.Context()
+	if ctx == nil {
+		return ""
+	}
+	switch {
+	case cliproxyexecutor.CodexLinuxFingerprintFromContext(ctx):
+		return "|codex-linux"
+	case cliproxyexecutor.SChannelTLSFromContext(ctx):
+		return "|schannel"
+	case cliproxyexecutor.ClaudeFingerprintFromContext(ctx):
+		return "|claude-fp"
+	default:
+		return ""
+	}
 }
 
 func buildOrderedH1RequestHead(req *http.Request, contentLength int64, lines []util.OriginalHeaderLine) ([]byte, error) {

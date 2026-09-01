@@ -5,6 +5,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/fingerprint"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
@@ -35,15 +36,42 @@ func isCodexSourceFormat(opts cliproxyexecutor.Options) bool {
 	return false
 }
 
+// codexClientOS reports the OS family of the Codex client that sent the inbound
+// request, read from its User-Agent.
+//
+// The client OS matters because CPA runs on Windows while the Codex client may
+// run inside WSL2/Linux, and the two Codex builds emit different TLS
+// ClientHellos: the Codex HTTP client keeps reqwest's default TLS backend
+// (codex-rs/http-client/client_builder.rs), which is native-tls, and native-tls
+// maps to SChannel on Windows and to OpenSSL on Linux. CPA cannot inspect the
+// client machine, so the inbound UA is the only available signal.
+//
+// opts.Headers carries the real inbound headers: the API layer fills it from the
+// gin request (sdk/api/handlers/model_execution.go, modelExecutionHeaders).
+func codexClientOS(opts cliproxyexecutor.Options) helps.CodexClientOS {
+	if opts.Headers == nil {
+		return helps.CodexClientOSUnknown
+	}
+	return helps.CodexClientOSFromUserAgent(opts.Headers.Get("User-Agent"))
+}
+
 // maybeMarkSChannelTLS opts the outbound request context into the SChannel-backed
-// ordered-HTTP/1.1 TLS handshake (matching the Codex CLI JA3) when both hold:
-//   - the schannel-tls config toggle is on, and
+// ordered-HTTP/1.1 TLS handshake (matching the Windows Codex CLI JA3) when all of
+// these hold:
+//   - the schannel-tls config toggle is on,
 //   - the inbound request originated from a Codex client (opts.SourceFormat is
-//     one of codexSourceFormats).
+//     one of codexSourceFormats), and
+//   - that client is not known to be non-Windows.
 //
 // This keeps the SChannel fingerprint confined to Codex traffic — including the
 // Codex→OpenAI-compatible (Responses→Chat) path — while Claude and other sources
 // keep the standard crypto/tls handshake. Ignored on non-Windows platforms.
+//
+// A client that reports a non-Windows OS is excluded because SChannel would
+// advertise the wrong fingerprint for it; those requests are routed to the
+// declared OpenSSL-shaped ClientHello by maybeMarkCodexLinuxFingerprint instead. An
+// unknown/absent UA keeps the historical SChannel behaviour, since CPA itself
+// runs on Windows.
 func maybeMarkSChannelTLS(ctx context.Context, cfg *config.Config, opts cliproxyexecutor.Options) context.Context {
 	if cfg == nil || !cfg.SChannelTLS {
 		return ctx
@@ -51,7 +79,36 @@ func maybeMarkSChannelTLS(ctx context.Context, cfg *config.Config, opts cliproxy
 	if !isCodexSourceFormat(opts) {
 		return ctx
 	}
+	if codexClientOS(opts) == helps.CodexClientOSNonWindows {
+		return ctx
+	}
 	return cliproxyexecutor.WithSChannelTLS(ctx)
+}
+
+// maybeMarkCodexLinuxFingerprint opts the outbound request context into using
+// the declared Linux Codex ClientHello shape (OpenSSL shaped, JA3
+// 0b85eb0d4981e69064e40753e4f0ac5f) on the ordered-HTTP/1.1 path when all of
+// these hold:
+//   - the schannel-tls config toggle is on,
+//   - the inbound request originated from a Codex client, and
+//   - that client reported a non-Windows OS in its User-Agent.
+//
+// It is the exact complement of maybeMarkSChannelTLS: for any given request at
+// most one of the two markers is set, so a Codex client gets the fingerprint of
+// the platform it actually runs on. The shared toggle keeps one operator-facing
+// switch meaning "align Codex outbound TLS with the real Codex client" rather
+// than splitting it per platform.
+func maybeMarkCodexLinuxFingerprint(ctx context.Context, cfg *config.Config, opts cliproxyexecutor.Options) context.Context {
+	if cfg == nil || !cfg.SChannelTLS {
+		return ctx
+	}
+	if !isCodexSourceFormat(opts) {
+		return ctx
+	}
+	if codexClientOS(opts) != helps.CodexClientOSNonWindows {
+		return ctx
+	}
+	return cliproxyexecutor.WithCodexLinuxFingerprint(ctx)
 }
 
 // maybeMarkClaudeFingerprint opts the outbound request context into the captured

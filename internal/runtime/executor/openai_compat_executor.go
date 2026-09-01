@@ -90,6 +90,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return e.executeImages(ctx, auth, req, opts, endpointPath)
 	}
 	ctx = maybeMarkSChannelTLS(ctx, e.cfg, opts)
+	ctx = maybeMarkCodexLinuxFingerprint(ctx, e.cfg, opts)
 	ctx = maybeMarkLowercaseHeaders(ctx, opts)
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -254,6 +255,7 @@ func openAICompatHeaderSkips(endpoint string) []string {
 
 func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (resp cliproxyexecutor.Response, err error) {
 	ctx = maybeMarkSChannelTLS(ctx, e.cfg, opts)
+	ctx = maybeMarkCodexLinuxFingerprint(ctx, e.cfg, opts)
 	ctx = maybeMarkLowercaseHeaders(ctx, opts)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
@@ -358,6 +360,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		return e.executeImagesStream(ctx, auth, req, opts, endpointPath)
 	}
 	ctx = maybeMarkSChannelTLS(ctx, e.cfg, opts)
+	ctx = maybeMarkCodexLinuxFingerprint(ctx, e.cfg, opts)
 	ctx = maybeMarkLowercaseHeaders(ctx, opts)
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -631,6 +634,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (_ *cliproxyexecutor.StreamResult, err error) {
 	ctx = maybeMarkSChannelTLS(ctx, e.cfg, opts)
+	ctx = maybeMarkCodexLinuxFingerprint(ctx, e.cfg, opts)
 	ctx = maybeMarkLowercaseHeaders(ctx, opts)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 

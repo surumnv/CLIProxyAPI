@@ -1205,3 +1205,240 @@ go vet ./internal/...         # clean
 JA3（`e97f5146a7009cc2918b50e903b6ff8d`），exit=0；`~/.claude.json` 采集后逐字节还原、
 无残留临时目录。连续多次采集后 `~/.claude/projects/` 下无 `claude-ja3-capture-*` transcript
 目录残留（清理前 12 个残留 → 清理后 0，真实项目条目数不变），确认不会堆积会话记录。
+
+---
+
+# 改动主题八：Codex 客户端跑在 WSL2/Debian 时对齐真实 OpenSSL 指纹
+
+> 本主题解决的场景：**CPA 仍运行在 Windows，但 Codex CLI 改到 WSL2/Debian 里跑**。
+> 此时改动主题六/七建立的 SChannel 出站指纹对这些请求是**错的**，需要按入站 UA 分流。
+
+## 背景
+
+改动主题六引入 SChannel 出站 TLS，让 Codex 源流量的 JA3 与真实 Codex 客户端一致；
+主题七把它收窄为按请求 context 打标。两者都基于一个隐含前提：**Codex 客户端跑在 Windows**。
+
+用户为了隔离，把 Codex CLI 装进了 WSL2 (Debian 13)，CPA 继续跑在 Windows。
+于是每个 Codex 请求都会被打上 SChannel 标记，出站 ClientHello 变成 Windows SChannel 的形状，
+而真实客户端此刻发的是 OpenSSL 的形状 —— 指纹张冠李戴，等于主动暴露「中间有代理」。
+
+## 根因
+
+Codex 的 HTTP 客户端在 `codex-rs/http-client/client_builder.rs` 里把 `tls_backend` 保持为
+`TlsBackend::TransportDefault`（只有显式 `with_rustls_tls()` 才切 rustls），即走 reqwest 的
+default-tls = **native-tls**。而 native-tls 的后端**随平台而变**：
+
+| 客户端平台 | native-tls 后端 | ClientHello 形状 |
+|---|---|---|
+| Windows | SChannel | 主题六复刻的形状 |
+| Linux / WSL2 | **OpenSSL**（Linux 版 Codex 静态内置 OpenSSL 3.6.3） | **全新形状** |
+
+rustls 只在 TLS 协商失败后作为兜底切换（`tls_backend_fallback.rs`），正常路径用不到。
+
+关键约束：**CPA 跑在 Windows 上，无法探测客户端机器**。因此判断依据只能是**入站请求的
+User-Agent**，它由 `codex-rs/login/src/auth/default_client.rs` 的 `get_codex_user_agent()`
+按 `{originator}/{version} ({os_type} {os_version}; {arch}) {terminal}` 组装，
+其中 os 段来自 os_info crate。
+
+## 实测数据（全部实测，非推断）
+
+环境：Codex CLI **0.151.0**（npm 安装，`x86_64-unknown-linux-musl`），
+Debian GNU/Linux 13 (trixie)，内核 `6.6.114.1-microsoft-standard-WSL2`，x86_64。
+
+**入站 UA**（用 `codex mcp-server` 的 `initialize` 响应取回进程自算的 UA）：
+
+```
+codex_cli_rs/0.151.0 (Debian 13.0.0; x86_64) WindowsTerminal
+```
+
+- os 段是 `Debian 13.0.0`（os_info 把 `VERSION_ID=13` 补成三段 semver，不是 `13.6`）
+- 终端段是 `WindowsTerminal` 且**这是正确的**：WSL2 继承了 `WT_SESSION`，
+  `codex-rs/terminal-detection` 在 TERM_PROGRAM 为空时落到 `WT_SESSION` 分支。
+  → **终端段不可作为平台判据，只有括号内的 os 段可靠。**
+- originator 随子命令变化：`codex exec` 实测发的是 `codex_exec/...`，
+  → **originator 也不可硬编码。**
+
+**ClientHello**（raw socket 实测，1540 字节）：
+
+- JA3 hash：`0b85eb0d4981e69064e40753e4f0ac5f`（Windows SChannel 版是 `6a5d235ee78c6aede6a61448b4e9ff1e`）
+- JA4：`t13d301000_1d37bd780c83_8e6e362c5eac`
+- 30 个 cipher、11 个扩展、**无 ALPN**、**无 GREASE**
+- 扩展顺序：`65281, 0(SNI), 11, 10, 35, 22, 23, 13, 43, 45, 51`
+- supported_groups 首项是 **X25519MLKEM768 (4588)**（后量子混合组）
+- **含扩展 22 (encrypt_then_mac)** —— OpenSSL 发，SChannel/BoringSSL 不发
+
+**HTTP wire image**（raw socket 抓 `codex exec` 的原始请求头）：全小写头名、无 `Connection`、
+无 `accept-encoding` —— 与主题六的「头名小写 + 不发 Connection」策略**完全一致**，
+说明这部分是 reqwest/hyper 的共性，**两个平台都不需要改**。
+
+## 设计决策
+
+### 1. 判据：只看括号内 os 段是否为 `Windows`
+
+从真实 Codex 二进制的 strings 提取出 os_info 的完整 OS 名称词表（约 50 个：
+`Debian Ubuntu Alpine Linux Arch Linux Fedora Mac OS FreeBSD ... Windows`），
+其中**只有 `Windows` 一个 token 表示 Windows**。所以判据取「os 段是否以 `Windows` 开头
+（大小写不敏感 + 词边界）」，而不是「是否匹配某个已知 Linux 发行版」。
+用户以后换发行版、甚至换到 macOS，都不需要改代码。
+
+UA 缺失 / 畸形 / 非 Codex → 归为 unknown，**走原来的 Windows/SChannel 路径**，保持向后兼容
+（CPA 本身跑在 Windows，历史行为即 SChannel）。
+
+### 2. 复刻方式：按实测参数声明 spec，交给 utls 生成（而不是回放抓包字节）
+
+Windows 那条路径之所以能 1:1，是因为 SChannel 是 CPA 与 Codex **共享的操作系统组件**，
+`internal/schannel` 直接调 `secur32.dll` 的 `AcquireCredentialsHandleW` /
+`InitializeSecurityContextW`，用的就是 Codex 自己用的那份实现，ClientHello 由 OS 现场生成。
+
+Linux 侧做不到同样的事，原因是硬性的：Codex 的 OpenSSL 3.6.3 是**静态链进它自己二进制**的，
+没有可加载的 .so；而 CPA 跑在 Windows，那台机器上根本不存在这个库。
+
+因此本次采用第三条路：**把实测出来的握手参数逐字段声明成 `utls.ClientHelloSpec`**，
+不在仓库里存放任何抓包字节。声明的内容只有协议常量——cipher 顺序、扩展顺序、
+supported_groups、signature_algorithms、supported_versions、psk_modes——
+这些是 OpenSSL 的编译期/配置期产物，不含任何一次会话的信息。
+
+已验证等价性：由声明式 spec 生成的 ClientHello 与实测记录**长度相同（均 1540 字节）、
+掩掉每连接随机部分后逐字节完全一致**，JA3 同为 `0b85eb0d4981e69064e40753e4f0ac5f`。
+
+三个必须注意的 utls 细节（均已核对 utls v1.8.2 源码并实测）：
+
+1. **扩展 22 用 `&tls.GenericExtension{Id: 22}` 声明**。utls 没有 encrypt_then_mac 的类型化
+   结构体，但 `GenericExtension` 能按 id + 空 body 精确写出这 4 个字节。
+   → 因此**无需**引入 `AllowBluntMimicry`，`SpecFromRaw` 保持严格模式不动
+   （它是管理 API 校验用户上传指纹的校验闸，严格更安全）。
+2. **不存在「抓包 SNI 泄漏」问题**。spec 里的 `&tls.SNIExtension{}` 本身不带主机名，
+   `ApplyPreset` 用 `config.ServerName` 填充。**已加单测在真实 socket 上断言线上字节
+   携带的是拨号主机。**
+3. **每连接随机量由 utls 生成**。`ApplyPreset` 无条件重写 `hello.Random`（长度为 0 时读
+   `config.rand()`）与 `hello.SessionId`（无条件读 32 字节），并对 X25519MLKEM768 用
+   `generateECDHEKey` + `mlkem.NewDecapsulationKey768` 现场生成 key_share。
+   spec 里的 `KeyShare.Data` 留空即可。
+
+真实握手已验证：`chatgpt.com:443` 与 `api.openai.com:443` 均
+`HANDSHAKE OK, TLS1.3, cipher 0x1302, verifiedChains=2`。
+
+### 2.1 指纹保存位置（必须明确）
+
+- **Debian/WSL2 Codex**：不写文件、不进 `auths`、不使用 `claude_ja3.json`。
+  当前 Debian 参数直接以 Go 常量表保存在
+  `internal/fingerprint/codex_linux_hello.go`，编译进 CPA 的 Windows `.exe`；
+  只保存 cipher / 扩展 / groups / signature algorithms 等协议形状。
+- **Debian 运行时**：每个新上游 TLS 连接调用 `CodexLinuxSpecH1()`，在内存创建新的
+  `utls.ClientHelloSpec`。`Random`、session ID、key share 公钥由 utls 每连接生成，
+  SNI 从实际拨号主机填充；连接池复用时不重复握手，并按 `|codex-linux` 单独分桶。
+- **Windows Codex**：不保存静态 ClientHello，直接调用 `secur32.dll`/SChannel，由
+  Windows 操作系统现场生成。
+- **Claude Code 默认路径**：`internal/runtime/executor/helps/utls_client.go` 内置
+  `claudeCodeTLSClientHelloSpec()`，对应 Claude Code `2.1.220` macOS arm64
+  Node/OpenSSL 风格，不读取本地文件。
+- **Claude Code 动态路径**：只有 `claude-ja3-auto-refresh: true` 且存在用户明确
+  采集/上传的记录时，才在 `<cfg.AuthDir>/claude_ja3.json` 持久化原始 ClientHello
+  hex 及 JA3 元数据，并由 `ClaudeSpecH1/H2()` 使用；它不参与 Debian Codex 路径。
+- Claude 的本地文件是当前 CPA 动态采集方案为跨重启保留“实际原生包”指纹的实现选择，
+  不是 TLS 协议硬性要求。原始记录可能含 SNI、版本特征和一次握手的随机/公钥字节，
+  由代码以 `0600` 保存，不应提交到 GitHub。Debian 与 Windows 使用不同平台包；
+  本会话未访问 Windows 文件系统或工具，未把 Windows 的具体 JA3/JA4 写成实测结论。
+- **JA3 与 ClientHello 的区别**：JA3/JA3 hash 只描述版本、cipher 顺序、扩展 ID、
+  groups 和 point formats，不包含 client random、session ID 或 key share 公钥。
+  因此同一 TLS profile 的每条新连接可以有不同的 ClientHello 字节，但 JA3 相同。
+  Codex 的“动态生成”指每连接重新生成这些一次性字段，不是每次 JA3 不同；当前
+  `CodexLinuxSpecH1()` 保存的是协议形状表，不是完整抓包。Claude 动态路径同样不是
+  直接使用 JSON 中的 JA3 字符串，而是从 `raw_hex` 解析 spec 后由 `utls.ApplyPreset`
+  重新生成一次性字段。采集若使用本机 IP 监听器，raw hello 可能没有 SNI，而 CPA
+  面向真实域名上游时会补入 SNI；因此 JSON 中的 JA3 是采集记录的 hash，不保证等于
+  最终线上 hash，但同一 profile 的新连接仍不会因为随机字段而改变 JA3。
+- 仓库中没有用户那次测量的 1540 字节原始抓包，源码也没有固定的 Random、session ID、
+  SNI 主机名、key share 公钥、账号、token、IP 或用户名。
+
+如果 Codex 更新只改变版本号，而 `Cargo.lock` 中的 `openssl-src`、`native-tls`、`reqwest`
+及 SSL 配置不变，无需重新测量。只有 TLS 库或其配置改变时才需要在 WSL2 重测并更新
+Go 参数表，然后重新编译 CPA；该更新不会由 `config.yaml`、热加载或
+`claude_ja3.json` 自动完成。
+
+### 3. ALPN：保持「没有」
+
+抓到的 hello **不含 ALPN 扩展**，意味着真实 Debian Codex 不协商 h2、走 HTTP/1.1。
+ordered-h1 出站正好也写 HTTP/1.1，所以**不覆盖 ALPN** 是最忠实且自洽的选择。
+
+### 4. 开关：复用现有 `schannel-tls`，不新增 YAML 键
+
+语义从「启用 SChannel」升级为「让 Codex 出站 TLS 指纹对齐真实 Codex 客户端」：
+开关打开时，Windows 入站 → SChannel（原行为），非 Windows 入站 → utls 复刻 OpenSSL；
+开关关闭时两条路径都不启用（保持原语义）。前端与 `config.example.yaml` 无需改动。
+
+## 顺带修复：ordered-h1 连接池键未区分 TLS 模式
+
+`orderedH1ConnKey` 原先只按 `scheme://host:port` 分桶。但 `handshakeOrderedH1TLS` 会按 context
+标记在 SChannel / Claude-utls / crypto-tls 之间选择，**握手（也就是 JA3）每条连接只发生一次**。
+键里不含模式，就意味着一个请求可能复用到「用别的 ClientHello 建起来的」空闲连接，
+指纹对齐被静默破坏。这是 fork 既有缺陷，加入第四种模式后必现，故本次一并修：
+键追加 `|codex-linux` / `|schannel` / `|claude-fp` 后缀，默认路径保持空后缀（键不变）。
+
+## 修改文件清单
+
+新增：
+- `internal/fingerprint/codex_linux_hello.go` —— 按实测声明的 cipher / groups / sigalgs 常量表 +
+  `CodexLinuxSpecH1()` / `CodexLinuxClientHelloRecord()` / `CodexLinuxJA3()`
+- `internal/fingerprint/codex_linux_hello_test.go`
+- `internal/runtime/executor/helps/codex_client_os.go` —— `CodexClientOSFromUserAgent`
+- `internal/runtime/executor/helps/codex_client_os_test.go`
+- `internal/runtime/executor/helps/ordered_h1_codex_linux_tls.go` —— `handshakeCodexLinuxH1TLS`
+- `internal/runtime/executor/helps/ordered_h1_conn_key_test.go`
+
+修改：
+- `sdk/cliproxy/executor/context.go` —— 新增 `WithCodexLinuxFingerprint` / `CodexLinuxFingerprintFromContext`
+- `internal/runtime/executor/schannel_gate.go` —— `maybeMarkSChannelTLS` 增加「非 Windows 则不打标」，
+  新增 `maybeMarkCodexLinuxFingerprint`
+- `internal/runtime/executor/schannel_gate_test.go` —— 补分流矩阵
+- `internal/runtime/executor/helps/ordered_h1_tls_windows.go` / `ordered_h1_tls_other.go` —— 插入新分支
+- `internal/runtime/executor/helps/ordered_h1_round_tripper.go` —— 连接池键并入 TLS 模式
+- `internal/runtime/executor/codex_executor_execute.go`（2 处）、`codex_executor_stream.go`（1 处）、
+  `openai_compat_executor.go`（4 处）—— 共 7 处打标点追加一行
+
+## 明确未改动的部分（及原因）
+
+- `maybeMarkLowercaseHeaders` —— 两个平台都是 reqwest/hyper，实测都发小写头名，**不需要平台判断**
+- 「不发 Connection 头」（主题六）—— Debian 实测同样没有该头
+- ordered-h1 头顺序透传（主题三/四/七）—— 与 OS 无关
+- `internal/misc/codex_local_ua*.go` —— 那是 **CPA 在本机自发探测**用的（管理面板拉模型列表等），
+  CPA 仍跑在 Windows、本机仍装着 Codex Desktop，保持原样
+- 出站 UA 相关逻辑 —— 用户已在 config.yaml 设 `codex.disable-codex-cloaking: true`，
+  `applyCodexCloakingHeaders` 直接返回，入站 Debian UA 会被如实透传，无需改动
+- `chatgpt.com` 的 HTTP/2 utls 路径 —— 该路径强制 h2，而忠实的 Debian 形状是「无 ALPN + h1.1」，
+  两者结构冲突；且本场景走的是第三方 relay（ordered-h1）。**该路径本次不改**，
+  若将来要覆盖，正确做法是让它也走 ordered-h1，而不是把无 ALPN 的 spec 塞进 h2 transport
+
+## 验证
+
+```bash
+gofmt -l .                                                  # 空
+go build -o test-output ./cmd/server && rm test-output      # ok
+GOOS=windows GOARCH=amd64 go build -o cpa-win.exe ./cmd/server   # ok（87MB）
+GOOS=windows go vet ./internal/... ./sdk/...                # clean
+go test ./...                                               # 91 个包全绿，0 失败
+```
+
+新增单测覆盖：
+- UA 解析 15 个用例（Debian/Windows/Desktop/macOS/exec 后缀/空/无括号/未闭合/
+  仅 `WindowsTerminal` token/大小写/`Windows` 前缀但非 Windows 的 OS 名）
+- 分流矩阵：Windows→SChannel、Debian→utls、两标记**互斥**、UA 缺失回落 SChannel、
+  开关关闭时两者都不打标、非 Codex 源不打标、nil Headers
+- 指纹：JA3 == `0b85eb0d4981e69064e40753e4f0ac5f`、11 扩展 / 30 cipher、
+  扩展顺序逐项钉定、每次返回独立 spec（互不污染）、无 ALPN
+- **无静态密钥断言**：spec 里 `SNIExtension.ServerName` 为空、每个 `KeyShare.Data` 为空，
+  即源码中不含任何来自测量运行的一次性数据
+- **随机性逐连接断言**：连续两次序列化，client_random / session_id / key_share 公钥必须互不相同
+- **真实 socket 线上字节断言**：`ApplyPreset` 后实际写出的 ClientHello 重算 JA3 等于实测值，
+  且携带拨号目标的 SNI
+- 连接池键：四种模式互不复用；明文 http 不受影响
+
+> **升级套用提醒**：本主题依赖主题六/七的 `handshakeOrderedH1TLS` + context 打标结构。
+> 升级后若官方重写 `handshakeOrderedH1TLS` 或 `orderedH1ConnKey`，需把
+> `handshakeCodexLinuxH1TLS` 分支与连接池键的模式后缀一并接回。
+> 声明的参数取自 Codex 0.151.0（内嵌 OpenSSL 3.6.3）。ClientHello 的形状只取决于内嵌 TLS
+> 库版本与调用方的 SSL_CTX 配置，**与 Codex 版本号无关**：只要 Codex 仓库 `Cargo.lock` 中
+> `openssl-src`（当前 `300.6.1+3.6.3`）、`native-tls`、`reqwest` 未变，就无需重新测量。
+> 这三行变化时才需要重测——这也是本条路径与 Windows/SChannel 路径的**本质差异**：
+> 后者直接调用系统 `secur32.dll`，OS 打补丁会自动跟随；本条路径是静态声明，
+> 上游变更不会自动反映，只能靠上述判据人工复核。

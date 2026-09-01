@@ -26,6 +26,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return e.executeOpenAIImage(ctx, auth, req, opts)
 	}
 	ctx = maybeMarkSChannelTLS(ctx, e.cfg, opts)
+	ctx = maybeMarkCodexLinuxFingerprint(ctx, e.cfg, opts)
 	ctx = maybeMarkLowercaseHeaders(ctx, opts)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
@@ -200,6 +201,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	ctx = maybeMarkSChannelTLS(ctx, e.cfg, opts)
+	ctx = maybeMarkCodexLinuxFingerprint(ctx, e.cfg, opts)
 	ctx = maybeMarkLowercaseHeaders(ctx, opts)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
